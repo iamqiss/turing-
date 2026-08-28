@@ -1,0 +1,51 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Build artifacts
+dist/
+build/
+*.app
+*.dmg
+*.exe
+*.AppImage
+
+# Dioxus / frontend
+clients/**/dist/
+clients/**/target/
+
+# Data volumes (local dev)
+data/
+postgres-data/
+redis-data/
+meilisearch-data/
+clickhouse-data/
+rustfs-data/
+git-repos/
+
+# Generated
+proto/gen/
+**/generated/
+
+# Logs
+*.log
+logs/
+
+# Test
+coverage/
+*.profraw
+

@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package turing.tarpit.messaging.v1;
+
+import "google/protobuf/timestamp.proto";
+import "common/v1.proto";
+
+service MessagingService {
+  // Channels
+  rpc CreateChannel(CreateChannelRequest) returns (CreateChannelResponse);
+  rpc ListChannels(ListChannelsRequest) returns (ListChannelsResponse);
+  rpc GetChannel(GetChannelRequest) returns (GetChannelResponse);
+  rpc JoinChannel(JoinChannelRequest) returns (JoinChannelResponse);
+  rpc LeaveChannel(LeaveChannelRequest) returns (LeaveChannelResponse);
+
+  // Messages
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+  rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
+  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
+
+  // Reactions
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
+  rpc RemoveReaction(RemoveReactionRequest) returns (RemoveReactionResponse);
+
+  // Realtime (server streaming)
+  rpc SubscribeChannel(SubscribeChannelRequest) returns (stream ChannelEvent);
+}
+
+message CreateChannelRequest {
+  common.v1.Id workspace_id = 1;
+  string kind = 2; // public | private | direct
+  optional string name = 3;
+  optional string topic = 4;
+  repeated common.v1.Id member_ids = 5; // for private / direct
+}
+
+message CreateChannelResponse {
+  Channel channel = 1;
+}
+
+message ListChannelsRequest {
+  common.v1.Id workspace_id = 1;
+}
+
+message ListChannelsResponse {
+  repeated Channel channels = 1;
+}
+
+message GetChannelRequest {
+  common.v1.Id channel_id = 1;
+}
+
+message GetChannelResponse {
+  Channel channel = 1;
+}
+
+message JoinChannelRequest {
+  common.v1.Id channel_id = 1;
+}
+
+message JoinChannelResponse {}
+
+message LeaveChannelRequest {
+  common.v1.Id channel_id = 1;
+}
+
+message LeaveChannelResponse {}
+
+message SendMessageRequest {
+  common.v1.Id channel_id = 1;
+  string content = 2;
+  optional common.v1.Id thread_id = 3;
+  optional common.v1.Id reply_to_id = 4;
+}
+
+message SendMessageResponse {
+  Message message = 1;
+}
+
+message ListMessagesRequest {
+  common.v1.Id channel_id = 1;
+  optional common.v1.Id thread_id = 2;
+  optional common.v1.Id before_id = 3; // pagination
+  uint32 limit = 4;
+}
+
+message ListMessagesResponse {
+  repeated Message messages = 1;
+  bool has_more = 2;
+}
+
+message EditMessageRequest {
+  common.v1.Id message_id = 1;
+  string content = 2;
+}
+
+message EditMessageResponse {
+  Message message = 1;
+}
+
+message DeleteMessageRequest {
+  common.v1.Id message_id = 1;
+}
+
+message DeleteMessageResponse {}
+
+message AddReactionRequest {
+  common.v1.Id message_id = 1;
+  string emoji = 2;
+}
+
+message AddReactionResponse {}
+
+message RemoveReactionRequest {
+  common.v1.Id message_id = 1;
+  string emoji = 2;
+}
+
+message RemoveReactionResponse {}
+
+message SubscribeChannelRequest {
+  common.v1.Id channel_id = 1;
+}
+
+message ChannelEvent {
+  oneof event {
+    MessageCreated message_created = 1;
+    MessageUpdated message_updated = 2;
+    MessageDeleted message_deleted = 3;
+    ReactionAdded reaction_added = 4;
+    ReactionRemoved reaction_removed = 5;
+    Typing typing = 6;
+  }
+}
+
+message MessageCreated {
+  Message message = 1;
+}
+
+message MessageUpdated {
+  Message message = 1;
+}
+
+message MessageDeleted {
+  common.v1.Id message_id = 1;
+}
+
+message ReactionAdded {
+  common.v1.Id message_id = 1;
+  common.v1.Id principal_id = 2;
+  string emoji = 3;
+}
+
+message ReactionRemoved {
+  common.v1.Id message_id = 1;
+  common.v1.Id principal_id = 2;
+  string emoji = 3;
+}
+
+message Typing {
+  common.v1.Id principal_id = 1;
+  bool is_typing = 2;
+}
+
+message Channel {
+  common.v1.Id id = 1;
+  common.v1.Id workspace_id = 2;
+  string kind = 3;
+  optional string name = 4;
+  optional string topic = 5;
+  bool is_archived = 6;
+  common.v1.Id created_by = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message Message {
+  common.v1.Id id = 1;
+  common.v1.Id channel_id = 2;
+  optional common.v1.Id thread_id = 3;
+  common.v1.Id author_id = 4;
+  string content = 5;
+  optional common.v1.Id reply_to_id = 6;
+  bool is_edited = 7;
+  bool is_deleted = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}

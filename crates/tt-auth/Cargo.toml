@@ -1,0 +1,33 @@
+[package]
+name = "tt-auth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "WebAuthn (passkeys) + PASETO sessions and agent tokens"
+
+[dependencies]
+tt-core = { workspace = true }
+tt-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+
+# Auth
+webauthn-rs = { workspace = true }
+pasetors = { workspace = true }
+argon2 = { workspace = true }          # for hashing agent API tokens at rest
+url = "2"
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+redis = { workspace = true }

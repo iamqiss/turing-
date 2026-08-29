@@ -1,0 +1,17 @@
+host = "0.0.0.0"
+port = 8080
+grpc_port = 50051
+realtime_backend = "redis"
+
+webauthn_rp_id = "localhost"
+webauthn_rp_origin = "http://localhost:8080"
+webauthn_rp_name = "Turing Tarpit"
+session_ttl_hours = 168
+ceremony_ttl_secs = 300
+
+s3_endpoint = "http://localhost:9000"
+s3_access_key = "turing"
+s3_secret_key = "turingsecret"
+s3_bucket = "turing-tarpit"
+s3_region = "us-east-1"
+git_repos_root = "./data/repos"

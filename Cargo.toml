@@ -15,10 +15,7 @@ members = [
     "crates/tt-workflows",
     "crates/tt-notifications",
     "crates/tt-api",
-    "crates/tt-server",
-    "clients/desktop",
-    "clients/web",
-    "clients/mobile",
+    "crates/tt-server"
 ]
 
 [workspace.package]
@@ -68,7 +65,7 @@ chrono = { version = "0.4", features = ["serde"] }
 time = "0.3"
 
 # Git
-gitoxide = { version = "0.38", default-features = false }
+gix = { version = "0.70", default-features = false, features = ["max-performance-safe"] }
 
 # Search
 meilisearch-sdk = "0.27"

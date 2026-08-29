@@ -21,6 +21,7 @@ pub use webauthn::WebauthnService;
 pub use store::AuthStore;
 pub use postgres::PostgresAuthStore;
 pub use principal::{AuthContext, PrincipalResolver};
+pub use middleware::extract_bearer;
 pub use ceremony::{
     CeremonyId, CeremonyStore, InMemoryCeremonyStore, RedisCeremonyStore,
     DEFAULT_CEREMONY_TTL_SECS,

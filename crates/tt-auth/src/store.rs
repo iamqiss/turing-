@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tt_core::domain::{Principal, PrincipalKind};
+use tt_core::domain::Principal;
 use tt_core::ids::{PrincipalId, SessionId};
 use uuid::Uuid;
 use webauthn_rs::prelude::Passkey;

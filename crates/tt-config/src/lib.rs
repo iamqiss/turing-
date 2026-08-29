@@ -1,0 +1,170 @@
+//! Configuration loading for Turing Tarpit.
+//!
+//! Sources (later overrides earlier):
+//! 1. `config/default.toml`
+//! 2. `config/{TT_ENV}.toml` (default: development)
+//! 3. Environment variables (prefixed `TT_` where applicable, plus common names)
+
+use std::path::Path;
+
+use figment::{
+    providers::{Env, Format, Serialized, Toml},
+    Figment,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub grpc_port: u16,
+
+    pub database_url: String,
+    pub redis_url: String,
+
+    pub meili_url: String,
+    pub meili_master_key: String,
+
+    pub realtime_backend: String,
+
+    // Auth
+    pub webauthn_rp_id: String,
+    pub webauthn_rp_origin: String,
+    pub webauthn_rp_name: String,
+    /// 32-byte key, hex-encoded. Empty = generate ephemeral (dev only).
+    pub session_key: String,
+    pub session_ttl_hours: i64,
+    pub ceremony_ttl_secs: u64,
+    pub agent_token_ttl_days: Option<i64>,
+
+    // Object storage
+    pub s3_endpoint: String,
+    pub s3_access_key: String,
+    pub s3_secret_key: String,
+    pub s3_bucket: String,
+    pub s3_region: String,
+
+    // Git
+    pub git_repos_root: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            host: "0.0.0.0".into(),
+            port: 8080,
+            grpc_port: 50051,
+            database_url: "postgres://turing:turing@localhost:5432/turing_tarpit".into(),
+            redis_url: "redis://localhost:6379".into(),
+            meili_url: "http://localhost:7700".into(),
+            meili_master_key: "turing-dev-master-key-change-me".into(),
+            realtime_backend: "redis".into(),
+            webauthn_rp_id: "localhost".into(),
+            webauthn_rp_origin: "http://localhost:8080".into(),
+            webauthn_rp_name: "Turing Tarpit".into(),
+            session_key: String::new(),
+            session_ttl_hours: 168,
+            ceremony_ttl_secs: 300,
+            agent_token_ttl_days: Some(90),
+            s3_endpoint: "http://localhost:9000".into(),
+            s3_access_key: "turing".into(),
+            s3_secret_key: "turingsecret".into(),
+            s3_bucket: "turing-tarpit".into(),
+            s3_region: "us-east-1".into(),
+            git_repos_root: "/var/lib/turing-tarpit/repos".into(),
+        }
+    }
+}
+
+impl Config {
+    pub fn load() -> anyhow::Result<Self> {
+        let env_name = std::env::var("TT_ENV").unwrap_or_else(|_| "development".into());
+
+        let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
+
+        if Path::new("config/default.toml").exists() {
+            figment = figment.merge(Toml::file("config/default.toml"));
+        }
+        let env_file = format!("config/{env_name}.toml");
+        if Path::new(&env_file).exists() {
+            figment = figment.merge(Toml::file(&env_file));
+        }
+
+        // Env: both TT_-prefixed and common unprefixed names used in .env.example
+        figment = figment
+            .merge(Env::prefixed("TT_").split("_"))
+            .merge(
+                Env::raw()
+                    .only(&[
+                        "DATABASE_URL",
+                        "REDIS_URL",
+                        "MEILI_URL",
+                        "MEILI_MASTER_KEY",
+                        "WEBAUTHN_RP_ID",
+                        "WEBAUTHN_RP_ORIGIN",
+                        "WEBAUTHN_RP_NAME",
+                        "SESSION_KEY",
+                        "SESSION_TTL_HOURS",
+                        "S3_ENDPOINT",
+                        "S3_ACCESS_KEY",
+                        "S3_SECRET_KEY",
+                        "S3_BUCKET",
+                        "S3_REGION",
+                        "GIT_REPOS_ROOT",
+                        "REALTIME_BACKEND",
+                    ])
+                    .map(|k| match k.as_str() {
+                        "DATABASE_URL" => "database_url".into(),
+                        "REDIS_URL" => "redis_url".into(),
+                        "MEILI_URL" => "meili_url".into(),
+                        "MEILI_MASTER_KEY" => "meili_master_key".into(),
+                        "WEBAUTHN_RP_ID" => "webauthn_rp_id".into(),
+                        "WEBAUTHN_RP_ORIGIN" => "webauthn_rp_origin".into(),
+                        "WEBAUTHN_RP_NAME" => "webauthn_rp_name".into(),
+                        "SESSION_KEY" => "session_key".into(),
+                        "SESSION_TTL_HOURS" => "session_ttl_hours".into(),
+                        "S3_ENDPOINT" => "s3_endpoint".into(),
+                        "S3_ACCESS_KEY" => "s3_access_key".into(),
+                        "S3_SECRET_KEY" => "s3_secret_key".into(),
+                        "S3_BUCKET" => "s3_bucket".into(),
+                        "S3_REGION" => "s3_region".into(),
+                        "GIT_REPOS_ROOT" => "git_repos_root".into(),
+                        "REALTIME_BACKEND" => "realtime_backend".into(),
+                        other => other.into(),
+                    }),
+            );
+
+        // Also map TT_HOST / TT_PORT style if prefixed split is awkward
+        if let Ok(v) = std::env::var("TT_HOST") {
+            figment = figment.merge(("host", v));
+        }
+        if let Ok(v) = std::env::var("TT_PORT") {
+            if let Ok(p) = v.parse::<u16>() {
+                figment = figment.merge(("port", p));
+            }
+        }
+        if let Ok(v) = std::env::var("TT_GRPC_PORT") {
+            if let Ok(p) = v.parse::<u16>() {
+                figment = figment.merge(("grpc_port", p));
+            }
+        }
+
+        let config: Config = figment.extract()?;
+        Ok(config)
+    }
+
+    /// Parse session key from hex. Returns None if empty (dev ephemeral key).
+    pub fn session_key_bytes(&self) -> anyhow::Result<Option<[u8; 32]>> {
+        let s = self.session_key.trim();
+        if s.is_empty() {
+            return Ok(None);
+        }
+        let bytes = hex::decode(s)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("SESSION_KEY must be 32 bytes (64 hex chars), got {}", bytes.len());
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Some(arr))
+    }
+}

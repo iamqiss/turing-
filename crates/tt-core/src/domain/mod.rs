@@ -5,9 +5,13 @@ mod workspace;
 mod channel;
 mod message;
 mod repository;
+mod pull_request;
+mod repository_settings;
 
 pub use principal::*;
 pub use workspace::*;
 pub use channel::*;
 pub use message::*;
 pub use repository::*;
+pub use pull_request::*;
+pub use repository_settings::*;

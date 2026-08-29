@@ -1,0 +1,3 @@
+syntax = "proto3";
+package turing.tarpit.search.v1;
+// Placeholder – filled as features land

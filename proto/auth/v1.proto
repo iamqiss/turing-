@@ -25,16 +25,17 @@ service AuthService {
 message BeginRegistrationRequest {
   string display_name = 1;
   string handle = 2;
-  string email = 3;
+  string email = 3; // optional; empty string = none
 }
 
 message BeginRegistrationResponse {
-  // opaque WebAuthn options JSON
-  string public_key_credential_creation_options = 1;
+  string public_key_credential_creation_options = 1; // JSON
+  string ceremony_id = 2;
 }
 
 message FinishRegistrationRequest {
-  string public_key_credential = 1; // JSON from navigator.credentials.create
+  string ceremony_id = 1;
+  string public_key_credential = 2; // JSON from navigator.credentials.create
 }
 
 message FinishRegistrationResponse {
@@ -43,15 +44,17 @@ message FinishRegistrationResponse {
 }
 
 message BeginAuthenticationRequest {
-  string handle = 1; // or email
+  string handle = 1;
 }
 
 message BeginAuthenticationResponse {
-  string public_key_credential_request_options = 1;
+  string public_key_credential_request_options = 1; // JSON
+  string ceremony_id = 2;
 }
 
 message FinishAuthenticationRequest {
-  string public_key_credential = 1;
+  string ceremony_id = 1;
+  string public_key_credential = 2;
 }
 
 message FinishAuthenticationResponse {

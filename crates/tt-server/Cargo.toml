@@ -1,0 +1,38 @@
+[package]
+name = "tt-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Turing Tarpit server binary"
+
+[[bin]]
+name = "turing-tarpit"
+path = "src/main.rs"
+
+[dependencies]
+tt-core = { workspace = true }
+tt-common = { workspace = true }
+tt-config = { workspace = true }
+tt-auth = { workspace = true }
+tt-messaging = { workspace = true }
+tt-git = { workspace = true }
+tt-realtime = { workspace = true }
+tt-api = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-web = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+redis = { workspace = true }
+figment = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+http = { workspace = true }
+chrono = { workspace = true }

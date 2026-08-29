@@ -2,13 +2,6 @@ syntax = "proto3";
 
 package turing.tarpit.common.v1;
 
-import "google/protobuf/timestamp.proto";
-
-// Shared ID wrappers (UUIDs as strings for simplicity in v1)
 message Id {
   string value = 1;
-}
-
-message Timestamp {
-  google.protobuf.Timestamp value = 1;
 }

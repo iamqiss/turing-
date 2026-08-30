@@ -6,6 +6,7 @@
 mod bootstrap;
 mod routes;
 mod state;
+mod push_observer;
 
 use std::net::SocketAddr;
 

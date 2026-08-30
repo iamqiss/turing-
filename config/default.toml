@@ -15,3 +15,6 @@ s3_secret_key = "turingsecret"
 s3_bucket = "turing-tarpit"
 s3_region = "us-east-1"
 git_repos_root = "./data/repos"
+
+clickhouse_url = "http://localhost:8123"
+clickhouse_database = "turing_tarpit"

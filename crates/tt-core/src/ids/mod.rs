@@ -77,3 +77,6 @@ id_type!(ReviewId);
 id_type!(WorkflowId);
 id_type!(AuditEventId);
 id_type!(SessionId);
+id_type!(IssueId);
+id_type!(IssueCommentId);
+id_type!(LabelId);

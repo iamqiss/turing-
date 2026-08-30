@@ -7,9 +7,10 @@ use tt_auth::{
     AgentTokenService, AuthStore, PrincipalResolver, SessionService, WebauthnService,
 };
 use tt_config::Config;
-use tt_git::{PullRequestService, RepoService};
+use tt_git::{IssueService, PullRequestService, RepoService, ReviewService};
 use tt_messaging::{MessagingService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
+use tt_storage::{ClickHouseClient, ProfileService};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,7 +23,11 @@ pub struct AppState {
     pub principal_resolver: Arc<PrincipalResolver>,
     pub repos: Arc<RepoService>,
     pub pull_requests: Arc<PullRequestService>,
+    pub issues: Arc<IssueService>,
+    pub reviews: Arc<ReviewService>,
     pub messaging: Arc<MessagingService>,
     pub workspaces: Arc<WorkspaceService>,
+    pub profiles: Arc<ProfileService>,
+    pub clickhouse: Arc<ClickHouseClient>,
     pub realtime: Arc<InMemoryRealtime>,
 }

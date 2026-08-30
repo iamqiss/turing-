@@ -228,6 +228,7 @@ struct SettingsJson {
     delete_branch_on_merge: bool,
     require_up_to_date: bool,
     restrict_merge_to_admins: bool,
+    required_approvals: u32,
 }
 
 fn settings_json(s: &RepositorySettings) -> SettingsJson {
@@ -242,6 +243,7 @@ fn settings_json(s: &RepositorySettings) -> SettingsJson {
         delete_branch_on_merge: s.delete_branch_on_merge,
         require_up_to_date: s.require_up_to_date,
         restrict_merge_to_admins: s.restrict_merge_to_admins,
+        required_approvals: s.required_approvals,
     }
 }
 
@@ -252,6 +254,7 @@ pub struct UpdateSettingsBody {
     pub delete_branch_on_merge: Option<bool>,
     pub require_up_to_date: Option<bool>,
     pub restrict_merge_to_admins: Option<bool>,
+    pub required_approvals: Option<u32>,
 }
 
 async fn get_settings(

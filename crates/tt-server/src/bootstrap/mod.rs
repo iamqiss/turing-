@@ -9,10 +9,11 @@ use tt_auth::{
     AgentTokenService, CeremonyStore, InMemoryCeremonyStore, PostgresAuthStore, PrincipalResolver,
     RedisCeremonyStore, SessionService, WebauthnService,
 };
-use tt_git::{PostgresPullRequestStore, PostgresRepoStore, PostgresSettingsStore, PullRequestService, RepoService};
+use tt_git::{IssueService, PostgresIssueStore, PostgresLabelStore, PostgresPullRequestStore, PostgresReviewStore, ReviewService, PostgresRepoStore, PostgresSettingsStore, PullRequestService, RepoService};
 use tt_messaging::{MessagingService, PostgresMessageStore, PostgresWorkspaceStore, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_config::Config;
+use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresProfileStore, ProfileService};
 
 use crate::state::AppState;
 
@@ -93,8 +94,16 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     info!(root = %config.git_repos_root, "git hosting ready");
 
     let pr_store = Arc::new(PostgresPullRequestStore::new(db.clone()));
-    let pull_requests = Arc::new(PullRequestService::new(pr_store, repos.clone()));
+    let pull_requests = Arc::new(PullRequestService::new(pr_store.clone(), repos.clone(), Arc::new(PostgresReviewStore::new(db.clone()))));
     info!("pull requests ready");
+
+    let issue_store = Arc::new(PostgresIssueStore::new(db.clone()));
+    let issues = Arc::new(IssueService::new(issue_store, Arc::new(PostgresLabelStore::new(db.clone())), repos.clone()));
+    info!("issues ready");
+
+    let review_store = Arc::new(PostgresReviewStore::new(db.clone()));
+    let reviews = Arc::new(ReviewService::new(review_store, pr_store as Arc<dyn tt_git::PullRequestStore>));
+    info!("reviews ready");
 
     // --- Messaging + realtime ---
     let realtime = Arc::new(InMemoryRealtime::new());
@@ -108,6 +117,38 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let workspaces = Arc::new(WorkspaceService::new(ws_store));
     info!("workspaces ready");
 
+    // --- Profiles + contribution analytics ---
+    let ch = {
+        let client = ClickHouseClient::new(
+            config.clickhouse_url.clone(),
+            config.clickhouse_database.clone(),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(2), client.ping()).await {
+            Ok(Ok(())) => {
+                info!("clickhouse reachable");
+                if let Ok(sql) = std::fs::read_to_string("migrations/clickhouse/001_contribution_events.sql") {
+                    if let Err(e) = client.ensure_schema(&sql).await {
+                        warn!(error = %e, "clickhouse schema apply failed");
+                    }
+                }
+                Arc::new(client)
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "clickhouse unavailable – dual-write disabled");
+                Arc::new(ClickHouseClient::disabled())
+            }
+            Err(_) => {
+                warn!("clickhouse ping timed out – dual-write disabled");
+                Arc::new(ClickHouseClient::disabled())
+            }
+        }
+    };
+    let contrib = Arc::new(PostgresContributionStore::new(db.clone(), ch.clone()));
+    let profile_store = Arc::new(PostgresProfileStore::new(db.clone()));
+    let profiles = Arc::new(ProfileService::new(profile_store, contrib, db.clone()));
+    info!("profiles ready");
+
+
     Ok(AppState {
         config,
         db,
@@ -118,8 +159,12 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         principal_resolver,
         repos,
         pull_requests,
+        issues,
+        reviews,
         messaging,
         workspaces,
+        profiles,
+        clickhouse: ch,
         realtime,
     })
 }

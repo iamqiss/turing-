@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use tt_auth::extract_bearer;
 use tt_core::domain::{MergeMethod, PullRequestStatus};
 use tt_core::ids::{PullRequestId, RepositoryId, WorkspaceId};
-use tt_git::GitError;
+use tt_git::{parse_closing_issue_numbers, GitError};
+use tt_core::domain::{ClientKind, ContributionKind};
+use tt_storage::events::new_event;
 
 use crate::state::AppState;
 
@@ -215,7 +217,13 @@ async fn get_one(
         Err(r) => return r,
     };
     match state.pull_requests.get_by_number(repo_id, number).await {
-        Ok(pr) => Json(to_json(&pr)).into_response(),
+        Ok(pr) => {
+            let strip = state.profiles.card(pr.author_id, 90).await.ok();
+            Json(serde_json::json!({
+                "pull_request": to_json(&pr),
+                "author_strip": strip,
+            })).into_response()
+        }
         Err(e) => map_err(e),
     }
 }
@@ -292,7 +300,56 @@ async fn merge(
         .merge(pr.id, ctx.principal_id(), requested)
         .await
     {
-        Ok(pr) => Json(to_json(&pr)).into_response(),
+        Ok(pr) => {
+            let mut ev = new_event(
+                ctx.principal_id(),
+                ContributionKind::PrMerge,
+                ClientKind::Api,
+            );
+            ev.repository_id = Some(pr.repository_id);
+            ev.metadata = serde_json::json!({ "pr_number": pr.number, "title": pr.title });
+            let _ = state.profiles.events_store().record(&ev).await;
+
+            // Fixes #N / Closes #N from title + body
+            let text = format!(
+                "{}
+{}",
+                pr.title,
+                pr.body.as_deref().unwrap_or("")
+            );
+            let closed_nums = parse_closing_issue_numbers(&text);
+            let mut closed = Vec::new();
+            for num in closed_nums {
+                match state
+                    .issues
+                    .close_by_number(pr.repository_id, num, ctx.principal_id())
+                    .await
+                {
+                    Ok(Some(issue)) => {
+                        closed.push(issue.number);
+                        let mut iev = new_event(
+                            ctx.principal_id(),
+                            ContributionKind::IssueClose,
+                            ClientKind::Api,
+                        );
+                        iev.repository_id = Some(pr.repository_id);
+                        iev.metadata = serde_json::json!({
+                            "number": issue.number,
+                            "via_pr": pr.number,
+                        });
+                        let _ = state.profiles.events_store().record(&iev).await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, number = num, "auto-close issue failed"),
+                }
+            }
+
+            Json(serde_json::json!({
+                "pull_request": to_json(&pr),
+                "closed_issues": closed,
+            }))
+            .into_response()
+        }
         Err(e) => map_err(e),
     }
 }

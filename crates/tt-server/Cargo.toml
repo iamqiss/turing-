@@ -20,6 +20,7 @@ tt-messaging = { workspace = true }
 tt-git = { workspace = true }
 tt-realtime = { workspace = true }
 tt-api = { workspace = true }
+tt-storage = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tonic-web = { workspace = true }

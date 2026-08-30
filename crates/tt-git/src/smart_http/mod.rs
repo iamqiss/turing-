@@ -24,13 +24,18 @@ use tracing::{debug, warn};
 use tt_auth::{extract_bearer, PrincipalResolver};
 use tt_core::ids::WorkspaceId;
 
+use crate::analytics::{analyze_recent_commits, PushAnalysis};
 use crate::error::GitError;
 use crate::repo::RepoService;
+use tt_core::ids::{PrincipalId, RepositoryId};
+use uuid::Uuid;
+
 
 #[derive(Clone)]
 pub struct GitHttpState {
     pub repos: Arc<RepoService>,
     pub resolver: Arc<PrincipalResolver>,
+    pub push_tx: Option<tokio::sync::mpsc::UnboundedSender<PushAnalysis>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -85,6 +90,38 @@ async fn resolve_repo_path(
         return Err(StatusCode::NOT_FOUND.into_response());
     }
     Ok((path, repo.is_private))
+}
+
+
+async fn authorize_principal(
+    state: &GitHttpState,
+    headers: &HeaderMap,
+    is_private: bool,
+    write: bool,
+) -> Result<PrincipalId, Response> {
+    if !is_private && !write {
+        return Ok(PrincipalId::from_uuid(Uuid::nil()));
+    }
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer);
+    let Some(token) = auth else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "authentication required",
+        )
+            .into_response());
+    };
+    let ctx = state.resolver.resolve_bearer(token).await.map_err(|e| {
+        (
+            StatusCode::UNAUTHORIZED,
+            format!("unauthorized: {e}"),
+        )
+            .into_response()
+    })?;
+    Ok(ctx.principal_id())
 }
 
 async fn authorize(
@@ -190,10 +227,30 @@ async fn receive_pack(
         Ok(v) => v,
         Err(r) => return r,
     };
-    if let Err(r) = authorize(&state, &headers, is_private, true).await {
-        return r;
+    let principal = match authorize_principal(&state, &headers, is_private, true).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let response = proxy_pack(&path, "git-receive-pack", body).await;
+
+    // Post-push analytics (best-effort; never fail the push)
+    if response.status().is_success() {
+        if let Some(tx) = state.push_tx.clone() {
+            let repos = state.repos.clone();
+            let path = path.clone();
+            let ws = workspace_id.clone();
+            let name = normalize_name(&repo_name).to_string();
+            tokio::spawn(async move {
+                let Ok(ws_id) = ws.parse::<WorkspaceId>() else { return };
+                let Ok(repo) = repos.get_by_name(ws_id, &name).await else { return };
+                match analyze_recent_commits(&path, ws_id, repo.id, principal, 15).await {
+                    Ok(analysis) => { let _ = tx.send(analysis); },
+                    Err(e) => warn!(error = %e, "push analytics failed"),
+                }
+            });
+        }
     }
-    proxy_pack(&path, "git-receive-pack", body).await
+    response
 }
 
 /// pkt-line advertise refs for smart HTTP.

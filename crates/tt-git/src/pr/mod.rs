@@ -13,15 +13,29 @@ use tt_core::ids::{PrincipalId, PullRequestId, RepositoryId};
 
 use crate::error::{GitError, Result};
 use crate::repo::RepoService;
+use crate::review::ReviewStore;
 
 pub struct PullRequestService {
     store: Arc<dyn PullRequestStore>,
     repos: Arc<RepoService>,
+    reviews: Arc<dyn ReviewStore>,
 }
 
 impl PullRequestService {
-    pub fn new(store: Arc<dyn PullRequestStore>, repos: Arc<RepoService>) -> Self {
-        Self { store, repos }
+    pub fn new(
+        store: Arc<dyn PullRequestStore>,
+        repos: Arc<RepoService>,
+        reviews: Arc<dyn ReviewStore>,
+    ) -> Self {
+        Self {
+            store,
+            repos,
+            reviews,
+        }
+    }
+
+    pub fn store(&self) -> Arc<dyn PullRequestStore> {
+        self.store.clone()
     }
 
     pub async fn create(
@@ -196,6 +210,16 @@ impl PullRequestService {
             .map_err(GitError::InvalidArgument)?;
 
         // --- Protections ---
+        if settings.required_approvals > 0 {
+            let approvals = self.reviews.count_approvals(id).await?;
+            if approvals < settings.required_approvals {
+                return Err(GitError::Conflict(format!(
+                    "need {} approval(s); have {}",
+                    settings.required_approvals, approvals
+                )));
+            }
+        }
+
         if settings.restrict_merge_to_admins && repo.created_by != actor_id {
             return Err(GitError::PermissionDenied(
                 "only repository admins may merge pull requests".into(),

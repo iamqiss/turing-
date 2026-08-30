@@ -46,6 +46,10 @@ pub struct Config {
 
     // Git
     pub git_repos_root: String,
+
+    /// ClickHouse HTTP interface, e.g. http://localhost:8123
+    pub clickhouse_url: String,
+    pub clickhouse_database: String,
 }
 
 impl Default for Config {
@@ -72,6 +76,8 @@ impl Default for Config {
             s3_bucket: "turing-tarpit".into(),
             s3_region: "us-east-1".into(),
             git_repos_root: "/var/lib/turing-tarpit/repos".into(),
+            clickhouse_url: "http://localhost:8123".into(),
+            clickhouse_database: "turing_tarpit".into(),
         }
     }
 }
@@ -129,6 +135,8 @@ impl Config {
                         "S3_BUCKET" => "s3_bucket".into(),
                         "S3_REGION" => "s3_region".into(),
                         "GIT_REPOS_ROOT" => "git_repos_root".into(),
+                        "CLICKHOUSE_URL" => "clickhouse_url".into(),
+                        "CLICKHOUSE_DATABASE" => "clickhouse_database".into(),
                         "REALTIME_BACKEND" => "realtime_backend".into(),
                         other => other.into(),
                     }),

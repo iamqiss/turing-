@@ -42,6 +42,8 @@ pub struct RepositorySettings {
     pub require_up_to_date: bool,
     /// Only the repository creator may merge (v1 admin stand-in).
     pub restrict_merge_to_admins: bool,
+    /// Minimum approving reviews required before merge (0 = off).
+    pub required_approvals: u32,
 }
 
 impl RepositorySettings {
@@ -57,6 +59,7 @@ impl RepositorySettings {
             delete_branch_on_merge: false,
             require_up_to_date: false,
             restrict_merge_to_admins: false,
+            required_approvals: 0,
         }
     }
 

@@ -4,6 +4,9 @@ mod repos;
 mod workspaces;
 mod dev;
 mod pull_requests;
+mod profiles;
+mod issues;
+mod reviews;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -14,12 +17,15 @@ use serde_json::json;
 use tt_git::{git_http_router, GitHttpState};
 use tt_messaging::{messaging_http_router, MessagingHttpState};
 
+use crate::push_observer::spawn_push_consumer;
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
+    let push_tx = spawn_push_consumer(state.profiles.events_store());
     let git_state = GitHttpState {
         repos: state.repos.clone(),
         resolver: state.principal_resolver.clone(),
+        push_tx: Some(push_tx),
     };
     let msg_state = MessagingHttpState {
         messaging: state.messaging.clone(),
@@ -32,6 +38,9 @@ pub fn router(state: AppState) -> Router {
         .merge(repos::router())
         .merge(workspaces::router())
         .merge(pull_requests::router())
+        .merge(profiles::router())
+        .merge(issues::router())
+        .merge(reviews::router())
         .merge(dev::router())
         .with_state(state)
         .merge(messaging_http_router(msg_state))

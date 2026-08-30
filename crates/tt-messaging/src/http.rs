@@ -73,8 +73,9 @@ async fn auth(
 fn map_err(e: MessagingError) -> axum::response::Response {
     match e {
         MessagingError::NotFound => StatusCode::NOT_FOUND.into_response(),
-        MessagingError::PermissionDenied(m) => (StatusCode::FORBIDDEN, m).into_response(),
+        MessagingError::PermissionDenied(m) | MessagingError::Forbidden(m) => (StatusCode::FORBIDDEN, m).into_response(),
         MessagingError::InvalidArgument(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+        MessagingError::Conflict(m) => (StatusCode::CONFLICT, m).into_response(),
         MessagingError::AlreadyExists => StatusCode::CONFLICT.into_response(),
         MessagingError::Other(err) => {
             tracing::error!(error = %err, "messaging error");

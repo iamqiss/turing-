@@ -102,7 +102,18 @@ async fn create_repo(
         )
         .await
     {
-        Ok(repo) => (StatusCode::CREATED, Json(to_response(&repo))).into_response(),
+        Ok(repo) => {
+            // Cascade org default policies when workspace belongs to an org
+            if let Ok(ws) = state.workspaces.get(ws).await {
+                if let Some(org_id) = ws.org_id {
+                    if let Ok(policy) = state.orgs.get_policy(org_id).await {
+                        let settings = policy.to_repo_settings(repo.id);
+                        let _ = state.repos.update_settings(settings).await;
+                    }
+                }
+            }
+            (StatusCode::CREATED, Json(to_response(&repo))).into_response()
+        }
         Err(tt_git::GitError::AlreadyExists) => StatusCode::CONFLICT.into_response(),
         Err(tt_git::GitError::InvalidName(m)) => {
             (StatusCode::BAD_REQUEST, m).into_response()

@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{PrincipalId, WorkspaceId};
+use crate::ids::{OrgId, PrincipalId, WorkspaceId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: WorkspaceId,
+    pub org_id: Option<OrgId>,
     pub name: String,
     pub slug: String,            // url-safe unique
     pub description: Option<String>,

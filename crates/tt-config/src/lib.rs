@@ -50,6 +50,13 @@ pub struct Config {
     /// ClickHouse HTTP interface, e.g. http://localhost:8123
     pub clickhouse_url: String,
     pub clickhouse_database: String,
+
+    /// Stripe secret key (sk_...) — empty disables live API calls
+    pub stripe_secret_key: String,
+    /// Stripe webhook signing secret (whsec_...)
+    pub stripe_webhook_secret: String,
+    /// Price id that maps to seat quantity
+    pub stripe_price_id: String,
 }
 
 impl Default for Config {
@@ -78,6 +85,9 @@ impl Default for Config {
             git_repos_root: "/var/lib/turing-tarpit/repos".into(),
             clickhouse_url: "http://localhost:8123".into(),
             clickhouse_database: "turing_tarpit".into(),
+            stripe_secret_key: String::new(),
+            stripe_webhook_secret: String::new(),
+            stripe_price_id: String::new(),
         }
     }
 }
@@ -137,6 +147,9 @@ impl Config {
                         "GIT_REPOS_ROOT" => "git_repos_root".into(),
                         "CLICKHOUSE_URL" => "clickhouse_url".into(),
                         "CLICKHOUSE_DATABASE" => "clickhouse_database".into(),
+                        "STRIPE_SECRET_KEY" => "stripe_secret_key".into(),
+                        "STRIPE_WEBHOOK_SECRET" => "stripe_webhook_secret".into(),
+                        "STRIPE_PRICE_ID" => "stripe_price_id".into(),
                         "REALTIME_BACKEND" => "realtime_backend".into(),
                         other => other.into(),
                     }),

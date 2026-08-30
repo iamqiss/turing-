@@ -41,9 +41,12 @@ impl MessagingServiceImpl {
 fn map_err(e: MessagingError) -> Status {
     match e {
         MessagingError::NotFound => Status::not_found(e.to_string()),
-        MessagingError::PermissionDenied(m) => Status::permission_denied(m),
+        MessagingError::PermissionDenied(m) | MessagingError::Forbidden(m) => {
+            Status::permission_denied(m)
+        }
         MessagingError::InvalidArgument(m) => Status::invalid_argument(m),
         MessagingError::AlreadyExists => Status::already_exists("already exists"),
+        MessagingError::Conflict(m) => Status::failed_precondition(m),
         MessagingError::Other(err) => Status::internal(err.to_string()),
     }
 }

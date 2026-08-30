@@ -7,6 +7,9 @@ mod pull_requests;
 mod profiles;
 mod issues;
 mod reviews;
+mod orgs;
+mod billing;
+mod compute;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -41,6 +44,9 @@ pub fn router(state: AppState) -> Router {
         .merge(profiles::router())
         .merge(issues::router())
         .merge(reviews::router())
+        .merge(orgs::router())
+        .merge(billing::router())
+        .merge(compute::router())
         .merge(dev::router())
         .with_state(state)
         .merge(messaging_http_router(msg_state))

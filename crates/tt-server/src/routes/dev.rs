@@ -55,6 +55,8 @@ struct BootstrapResponse {
     session_token: String,
     workspace_id: String,
     workspace_slug: String,
+    org_id: String,
+    org_slug: String,
 }
 
 async fn bootstrap(
@@ -168,6 +170,26 @@ async fn bootstrap(
         },
     };
 
+    // Personal org + attach workspace
+    let org = match state
+        .orgs
+        .ensure_personal(principal.id, &principal.handle)
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("org: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let _ = state
+        .orgs
+        .attach_workspace(org.id, workspace.id, principal.id)
+        .await;
+
     (
         StatusCode::CREATED,
         Json(BootstrapResponse {
@@ -176,6 +198,8 @@ async fn bootstrap(
             session_token,
             workspace_id: workspace.id.to_string(),
             workspace_slug: workspace.slug,
+            org_id: org.id.to_string(),
+            org_slug: org.slug,
         }),
     )
         .into_response()

@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use tracing::info;
 use tt_core::domain::{Workspace, WorkspaceMember, WorkspaceRole};
-use tt_core::ids::{PrincipalId, WorkspaceId};
+use tt_core::ids::{OrgId, PrincipalId, WorkspaceId};
 use uuid::Uuid;
 
 use crate::error::{MessagingError, Result};
@@ -36,6 +36,7 @@ impl PostgresWorkspaceStore {
 #[derive(FromRow)]
 struct WsRow {
     id: Uuid,
+    org_id: Option<Uuid>,
     name: String,
     slug: String,
     description: Option<String>,
@@ -48,6 +49,7 @@ impl From<WsRow> for Workspace {
     fn from(r: WsRow) -> Self {
         Workspace {
             id: WorkspaceId::from_uuid(r.id),
+            org_id: r.org_id.map(OrgId::from_uuid),
             name: r.name,
             slug: r.slug,
             description: r.description,
@@ -73,11 +75,12 @@ impl WorkspaceStore for PostgresWorkspaceStore {
         let mut tx = self.pool.begin().await.map_err(|e| MessagingError::Other(e.into()))?;
         sqlx::query(
             r#"
-            INSERT INTO workspaces (id, name, slug, description, owner_id, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            INSERT INTO workspaces (id, org_id, name, slug, description, owner_id, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             "#,
         )
         .bind(ws.id.as_uuid())
+        .bind(ws.org_id.as_ref().map(|id| *id.as_uuid()))
         .bind(&ws.name)
         .bind(&ws.slug)
         .bind(&ws.description)
@@ -232,6 +235,7 @@ impl WorkspaceService {
         let now = Utc::now();
         let ws = Workspace {
             id: WorkspaceId::new(),
+            org_id: None,
             name,
             slug,
             description,
@@ -241,6 +245,37 @@ impl WorkspaceService {
         };
         self.store.create(&ws, WorkspaceRole::Owner).await?;
         info!(workspace_id = %ws.id, slug = %ws.slug, "workspace created");
+        Ok(ws)
+    }
+
+    pub async fn create_in_org(
+        &self,
+        name: String,
+        slug: String,
+        description: Option<String>,
+        owner_id: PrincipalId,
+        org_id: OrgId,
+    ) -> Result<Workspace> {
+        Self::validate_slug(&slug)?;
+        if name.trim().is_empty() {
+            return Err(MessagingError::InvalidArgument("name required".into()));
+        }
+        if self.store.get_by_slug(&slug).await?.is_some() {
+            return Err(MessagingError::AlreadyExists);
+        }
+        let now = Utc::now();
+        let ws = Workspace {
+            id: WorkspaceId::new(),
+            org_id: Some(org_id),
+            name,
+            slug,
+            description,
+            owner_id,
+            created_at: now,
+            updated_at: now,
+        };
+        self.store.create(&ws, WorkspaceRole::Owner).await?;
+        info!(workspace_id = %ws.id, org_id = %org_id, "workspace created in org");
         Ok(ws)
     }
 

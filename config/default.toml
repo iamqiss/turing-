@@ -18,3 +18,7 @@ git_repos_root = "./data/repos"
 
 clickhouse_url = "http://localhost:8123"
 clickhouse_database = "turing_tarpit"
+
+stripe_secret_key = ""
+stripe_webhook_secret = ""
+stripe_price_id = ""

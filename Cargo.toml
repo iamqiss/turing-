@@ -93,6 +93,8 @@ tt-messaging = { path = "crates/tt-messaging" }
 tt-git = { path = "crates/tt-git" }
 tt-search = { path = "crates/tt-search" }
 tt-storage = { path = "crates/tt-storage" }
+tt-compute = { path = "crates/tt-compute" }
+tt-net = { path = "crates/tt-net" }
 tt-realtime = { path = "crates/tt-realtime" }
 tt-agents = { path = "crates/tt-agents" }
 tt-audit = { path = "crates/tt-audit" }

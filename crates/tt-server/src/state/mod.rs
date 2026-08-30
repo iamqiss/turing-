@@ -8,9 +8,10 @@ use tt_auth::{
 };
 use tt_config::Config;
 use tt_git::{IssueService, PullRequestService, RepoService, ReviewService};
-use tt_messaging::{MessagingService, WorkspaceService};
+use tt_messaging::{MessagingService, OrgService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_storage::{ClickHouseClient, ProfileService};
+use tt_compute::ComputeService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +28,8 @@ pub struct AppState {
     pub reviews: Arc<ReviewService>,
     pub messaging: Arc<MessagingService>,
     pub workspaces: Arc<WorkspaceService>,
+    pub orgs: Arc<OrgService>,
+    pub compute: Arc<ComputeService>,
     pub profiles: Arc<ProfileService>,
     pub clickhouse: Arc<ClickHouseClient>,
     pub realtime: Arc<InMemoryRealtime>,

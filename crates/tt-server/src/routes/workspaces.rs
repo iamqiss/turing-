@@ -28,6 +28,7 @@ pub struct CreateBody {
 #[derive(Debug, Serialize)]
 struct WorkspaceJson {
     id: String,
+    org_id: Option<String>,
     name: String,
     slug: String,
     description: Option<String>,
@@ -37,6 +38,7 @@ struct WorkspaceJson {
 fn to_json(w: &tt_core::domain::Workspace) -> WorkspaceJson {
     WorkspaceJson {
         id: w.id.to_string(),
+        org_id: w.org_id.map(|id| id.to_string()),
         name: w.name.clone(),
         slug: w.slug.clone(),
         description: w.description.clone(),
@@ -65,7 +67,10 @@ fn map_err(e: MessagingError) -> axum::response::Response {
         MessagingError::NotFound => StatusCode::NOT_FOUND.into_response(),
         MessagingError::AlreadyExists => StatusCode::CONFLICT.into_response(),
         MessagingError::InvalidArgument(m) => (StatusCode::BAD_REQUEST, m).into_response(),
-        MessagingError::PermissionDenied(m) => (StatusCode::FORBIDDEN, m).into_response(),
+        MessagingError::PermissionDenied(m) | MessagingError::Forbidden(m) => {
+            (StatusCode::FORBIDDEN, m).into_response()
+        }
+        MessagingError::Conflict(m) => (StatusCode::CONFLICT, m).into_response(),
         MessagingError::Other(err) => {
             tracing::error!(error = %err, "workspace error");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

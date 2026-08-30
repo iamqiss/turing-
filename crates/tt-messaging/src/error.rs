@@ -8,10 +8,14 @@ pub enum MessagingError {
     NotFound,
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     #[error("already exists")]
     AlreadyExists,
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

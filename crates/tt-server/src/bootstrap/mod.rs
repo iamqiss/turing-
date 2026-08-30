@@ -10,10 +10,12 @@ use tt_auth::{
     RedisCeremonyStore, SessionService, WebauthnService,
 };
 use tt_git::{IssueService, PostgresIssueStore, PostgresLabelStore, PostgresPullRequestStore, PostgresReviewStore, ReviewService, PostgresRepoStore, PostgresSettingsStore, PullRequestService, RepoService};
-use tt_messaging::{MessagingService, PostgresMessageStore, PostgresWorkspaceStore, WorkspaceService};
+use tt_messaging::{MessagingService, OrgService, PostgresMessageStore, PostgresOrgStore, PostgresWorkspaceStore, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_config::Config;
 use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresProfileStore, ProfileService};
+use tt_compute::{ComputeService, HttpProvider, PostgresComputeStore};
+use tt_net::PostgresIpAllocator;
 
 use crate::state::AppState;
 
@@ -117,6 +119,19 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let workspaces = Arc::new(WorkspaceService::new(ws_store));
     info!("workspaces ready");
 
+    let org_store = Arc::new(PostgresOrgStore::new(db.clone()));
+    let orgs = Arc::new(OrgService::new(org_store, db.clone()));
+    info!("orgs ready");
+
+    let compute_store = Arc::new(PostgresComputeStore::new(db.clone()));
+    let ip_alloc = Arc::new(PostgresIpAllocator::new(db.clone()));
+    let compute = Arc::new(ComputeService::new(
+        compute_store,
+        ip_alloc,
+        Arc::new(HttpProvider::new()),
+    ));
+    info!("compute ready (HTTP → tt-node)");
+
     // --- Profiles + contribution analytics ---
     let ch = {
         let client = ClickHouseClient::new(
@@ -163,6 +178,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         reviews,
         messaging,
         workspaces,
+        orgs,
+        compute,
         profiles,
         clickhouse: ch,
         realtime,
@@ -231,7 +248,16 @@ async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         }
         info!(%name, "applying migration");
         let sql = std::fs::read_to_string(&path)?;
-        sqlx::Executor::execute(pool, sql.as_str()).await?;
+        // Postgres + sqlx: run statement-by-statement so a multi-statement
+        // file cannot partially apply and still look "successful".
+        for stmt in split_sql_statements(&sql) {
+            if stmt.is_empty() {
+                continue;
+            }
+            sqlx::Executor::execute(pool, stmt.as_str())
+                .await
+                .map_err(|e| anyhow::anyhow!("migration {name} failed on: {stmt}\n{e}"))?;
+        }
         sqlx::query("INSERT INTO _tt_migrations (filename) VALUES ($1)")
             .bind(&name)
             .execute(pool)
@@ -239,6 +265,31 @@ async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         info!(%name, "migration applied");
     }
     Ok(())
+}
+
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in sql.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--") {
+            continue;
+        }
+        cur.push_str(line);
+        cur.push('\n');
+        if trimmed.ends_with(';') {
+            let s = cur.trim().trim_end_matches(';').trim().to_string();
+            if !s.is_empty() {
+                out.push(s);
+            }
+            cur.clear();
+        }
+    }
+    let s = cur.trim().trim_end_matches(';').trim().to_string();
+    if !s.is_empty() {
+        out.push(s);
+    }
+    out
 }
 
 fn mask_url(url: &str) -> String {

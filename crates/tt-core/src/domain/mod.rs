@@ -11,6 +11,8 @@ mod profile;
 mod issue;
 mod label;
 mod review;
+mod org;
+mod compute;
 
 pub use principal::*;
 pub use workspace::*;
@@ -23,3 +25,5 @@ pub use profile::*;
 pub use issue::*;
 pub use label::*;
 pub use review::*;
+pub use org::*;
+pub use compute::*;

@@ -25,3 +25,14 @@ stripe_price_id = ""
 
 meili_url = "http://localhost:7700"
 meili_master_key = "turing-dev-master-key-change-me"
+
+inference_url = ""
+inference_model = "olmo-3-7b"
+inference_api_key = ""
+
+# Scarlet Letter KMS: local | http | aws
+kms_provider = "local"  # production: "tt" + tt-kms on metal
+kms_key_id = "scarlet"
+kms_endpoint = "http://127.0.0.1:9797"
+kms_token = ""
+kms_region = "eu-central-1"

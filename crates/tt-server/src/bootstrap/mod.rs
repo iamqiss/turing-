@@ -16,6 +16,9 @@ use tt_config::Config;
 use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresLifecycleStore, PostgresProfileStore, ProfileService, LifecycleStore};
 use tt_compute::{ComputeService, HttpProvider, Orchestrator, OrchestratorConfig, PostgresComputeStore};
 use tt_search::{MeiliClient, SearchService};
+use tt_agents::{AgentHarness, BuiltinTools, InferenceClient, PostgresAgentStore};
+use tt_secrets::{PostgresSecretsStore, SecretsService};
+use tt_storage::{LocalObjectStore, MediaService};
 use tt_net::PostgresIpAllocator;
 
 use crate::state::AppState;
@@ -226,6 +229,75 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         svc
     };
 
+    let kms = tt_secrets::KmsConfig {
+        provider: config.kms_provider.clone(),
+        local_key_hex: config.secrets_key.clone(),
+        key_id: config.kms_key_id.clone(),
+        endpoint: config.kms_endpoint.clone(),
+        token: config.kms_token.clone(),
+        region: config.kms_region.clone(),
+    };
+    let scarlet = Arc::new(
+        SecretsService::with_kms(
+            Arc::new(PostgresSecretsStore::new(db.clone())),
+            &kms,
+        )
+        .map_err(|e| anyhow::anyhow!("scarlet kms: {e}"))?,
+    );
+    info!(provider = %kms.provider, key_id = %kms.key_id, "Scarlet Letter KMS ready");
+
+    let media_root = std::path::PathBuf::from(&config.media_root);
+    tokio::fs::create_dir_all(&media_root).await.ok();
+    let media = Arc::new(MediaService::new(
+        db.clone(),
+        Arc::new(LocalObjectStore::new(media_root)),
+        "/api/media",
+    ));
+    info!(root = %config.media_root, "media store ready");
+
+    let agents = {
+        let inference = if config.inference_url.trim().is_empty() {
+            info!("inference_url empty – agent model disabled (tools still loadable)");
+            InferenceClient::disabled()
+        } else {
+            info!(url = %config.inference_url, model = %config.inference_model, "inference client");
+            InferenceClient::new(
+                config.inference_url.clone(),
+                config.inference_model.clone(),
+                if config.inference_api_key.is_empty() {
+                    None
+                } else {
+                    Some(config.inference_api_key.clone())
+                },
+            )
+        };
+        let tools = BuiltinTools {
+            search: Some(Arc::new(crate::agent_adapters::SearchAdapter {
+                search: search.clone(),
+            })),
+            git: Some(Arc::new(crate::agent_adapters::GitAdapter {
+                repos: repos.clone(),
+                issues: issues.clone(),
+                pull_requests: pull_requests.clone(),
+            })),
+            lifecycle: Some(Arc::new(crate::agent_adapters::LifecycleAdapter {
+                store: lifecycle_store.clone(),
+            })),
+            compute: Some(Arc::new(crate::agent_adapters::ComputeAdapter {
+                compute: compute.clone(),
+            })),
+            secrets: Some(Arc::new(crate::agent_adapters::SecretsAdapter {
+                scarlet: scarlet.clone(),
+            })),
+        };
+        Arc::new(AgentHarness::new(
+            Arc::new(PostgresAgentStore::new(db.clone())),
+            inference,
+            tools,
+        ))
+    };
+    info!("agent harness ready (Pearl tools + Scarlet Letter)");
+
     Ok(AppState {
         config,
         db,
@@ -247,6 +319,9 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         lifecycle: lifecycle_store,
         realtime,
         search,
+        agents,
+        scarlet,
+        media,
     })
 }
 

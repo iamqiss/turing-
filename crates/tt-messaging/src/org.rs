@@ -621,6 +621,8 @@ impl OrgPolicy {
             require_up_to_date: self.require_up_to_date,
             restrict_merge_to_admins: self.restrict_merge_to_admins,
             required_approvals: self.required_approvals,
+            block_secret_push: true,
+            secret_push_allowlist: vec![],
         }
     }
 }

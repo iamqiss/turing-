@@ -274,6 +274,10 @@ async fn receive_pack(
         Ok(p) => p,
         Err(r) => return r,
     };
+    // Ensure Scarlet Letter pre-receive is present (blocks secret-shaped pushes)
+    if let Err(e) = crate::hooks::ensure_protection_hook(&path).await {
+        warn!(error = %e, "ensure push protection hook failed");
+    }
     let response = proxy_pack(&path, "git-receive-pack", body).await;
 
     // Post-push analytics (best-effort; never fail the push)

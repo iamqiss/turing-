@@ -11,6 +11,9 @@ mod orgs;
 mod billing;
 mod compute;
 mod search;
+mod agents;
+mod secrets;
+mod media;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -36,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         messaging: state.messaging.clone(),
         resolver: state.principal_resolver.clone(),
         search: Some(state.search.clone()),
+        media: Some(state.media.clone()),
     };
 
     Router::new()
@@ -51,6 +55,9 @@ pub fn router(state: AppState) -> Router {
         .merge(billing::router())
         .merge(compute::router())
         .merge(search::router())
+        .merge(agents::router())
+        .merge(media::router())
+        .merge(secrets::router())
         .merge(dev::router())
         .with_state(state)
         .merge(messaging_http_router(msg_state))

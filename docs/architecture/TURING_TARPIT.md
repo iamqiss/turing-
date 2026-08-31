@@ -353,3 +353,6 @@ Turing Tarpit’s own **secure environment variables and secrets sharing**:
 ---
 
 *Turing Tarpit — complete the loop, then let the Roomies in.*
+
+## Scarlet Letter
+See [SCARLET_LETTER.md](./SCARLET_LETTER.md). Agent name: **Pearl**.

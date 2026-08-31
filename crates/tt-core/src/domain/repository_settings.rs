@@ -44,6 +44,10 @@ pub struct RepositorySettings {
     pub restrict_merge_to_admins: bool,
     /// Minimum approving reviews required before merge (0 = off).
     pub required_approvals: u32,
+    /// Reject git pushes containing secret-shaped strings (Scarlet Letter).
+    pub block_secret_push: bool,
+    /// Rule ids to ignore (e.g. high_entropy_assign in test fixtures).
+    pub secret_push_allowlist: Vec<String>,
 }
 
 impl RepositorySettings {
@@ -60,6 +64,8 @@ impl RepositorySettings {
             require_up_to_date: false,
             restrict_merge_to_admins: false,
             required_approvals: 0,
+            block_secret_push: true,
+            secret_push_allowlist: vec![],
         }
     }
 

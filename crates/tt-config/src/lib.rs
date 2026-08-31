@@ -46,6 +46,7 @@ pub struct Config {
 
     // Git
     pub git_repos_root: String,
+    pub media_root: String,
 
     /// ClickHouse HTTP interface, e.g. http://localhost:8123
     pub clickhouse_url: String,
@@ -62,8 +63,24 @@ pub struct Config {
     pub platform_operator_ids: String,
 
     /// 32-byte hex key for encrypting secrets at rest (agent tokens, deploy tokens).
-    /// Falls back to session_key if empty.
+    /// Falls back to session_key if empty. Also used as local KMS KEK when kms_provider=local.
     pub secrets_key: String,
+
+    /// Scarlet Letter KMS: local | http | aws
+    pub kms_provider: String,
+    /// AWS key ARN/alias or Vault transit key name
+    pub kms_key_id: String,
+    /// Vault/HTTP KMS base URL
+    pub kms_endpoint: String,
+    /// Vault token / bearer
+    pub kms_token: String,
+    /// AWS region when kms_provider=aws
+    pub kms_region: String,
+
+    /// OpenAI-compatible base URL for OLMo (e.g. http://gpu-host:8000)
+    pub inference_url: String,
+    pub inference_model: String,
+    pub inference_api_key: String,
 }
 
 impl Default for Config {
@@ -90,6 +107,7 @@ impl Default for Config {
             s3_bucket: "turing-tarpit".into(),
             s3_region: "us-east-1".into(),
             git_repos_root: "/var/lib/turing-tarpit/repos".into(),
+            media_root: "/var/lib/turing-tarpit/media".into(),
             clickhouse_url: "http://localhost:8123".into(),
             clickhouse_database: "turing_tarpit".into(),
             stripe_secret_key: String::new(),
@@ -97,6 +115,14 @@ impl Default for Config {
             stripe_price_id: String::new(),
             platform_operator_ids: String::new(),
             secrets_key: String::new(),
+            kms_provider: "local".into(), // lab; production: "tt"
+            kms_key_id: "scarlet".into(),
+            kms_endpoint: String::new(),
+            kms_token: String::new(),
+            kms_region: "eu-central-1".into(),
+            inference_url: String::new(),
+            inference_model: "olmo-3-7b".into(),
+            inference_api_key: String::new(),
         }
     }
 }
@@ -154,6 +180,7 @@ impl Config {
                         "S3_BUCKET" => "s3_bucket".into(),
                         "S3_REGION" => "s3_region".into(),
                         "GIT_REPOS_ROOT" => "git_repos_root".into(),
+                        "MEDIA_ROOT" => "media_root".into(),
                         "CLICKHOUSE_URL" => "clickhouse_url".into(),
                         "CLICKHOUSE_DATABASE" => "clickhouse_database".into(),
                         "STRIPE_SECRET_KEY" => "stripe_secret_key".into(),
@@ -161,6 +188,14 @@ impl Config {
                         "STRIPE_PRICE_ID" => "stripe_price_id".into(),
                         "PLATFORM_OPERATOR_IDS" => "platform_operator_ids".into(),
                         "SECRETS_KEY" => "secrets_key".into(),
+                        "KMS_PROVIDER" => "kms_provider".into(),
+                        "KMS_KEY_ID" => "kms_key_id".into(),
+                        "KMS_ENDPOINT" => "kms_endpoint".into(),
+                        "KMS_TOKEN" => "kms_token".into(),
+                        "KMS_REGION" => "kms_region".into(),
+                        "INFERENCE_URL" => "inference_url".into(),
+                        "INFERENCE_MODEL" => "inference_model".into(),
+                        "INFERENCE_API_KEY" => "inference_api_key".into(),
                         "REALTIME_BACKEND" => "realtime_backend".into(),
                         other => other.into(),
                     }),

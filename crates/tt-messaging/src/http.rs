@@ -21,6 +21,8 @@ pub struct MessagingHttpState {
     pub resolver: Arc<PrincipalResolver>,
     /// Optional Meilisearch indexer (set by tt-server)
     pub search: Option<Arc<tt_search::SearchService>>,
+    /// Optional media for attachment linking
+    pub media: Option<Arc<tt_storage::MediaService>>,
 }
 
 pub fn router(state: MessagingHttpState) -> Router {
@@ -128,9 +130,15 @@ struct MessageJson {
     is_edited: bool,
     is_deleted: bool,
     created_at: String,
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 fn message_json(m: &tt_core::domain::Message) -> MessageJson {
+    message_json_with_attachments(m, &[])
+}
+
+fn message_json_with_attachments(m: &tt_core::domain::Message, attachment_ids: &[String]) -> MessageJson {
     MessageJson {
         id: m.id.to_string(),
         channel_id: m.channel_id.to_string(),
@@ -145,6 +153,7 @@ fn message_json(m: &tt_core::domain::Message) -> MessageJson {
         is_edited: m.is_edited,
         is_deleted: m.is_deleted,
         created_at: m.created_at.to_rfc3339(),
+        attachment_ids: attachment_ids.to_vec(),
     }
 }
 
@@ -269,6 +278,8 @@ struct SendMessageBody {
     content: String,
     thread_id: Option<String>,
     reply_to_id: Option<String>,
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 async fn send_message(
@@ -293,6 +304,18 @@ async fn send_message(
         .await
     {
         Ok(msg) => {
+            let mut att_ids: Vec<String> = Vec::new();
+            if let Some(ref media) = state.media {
+                let uuids: Vec<uuid::Uuid> = body
+                    .attachment_ids
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if !uuids.is_empty() {
+                    let _ = media.link_to_message(*msg.id.as_uuid(), &uuids).await;
+                    att_ids = uuids.iter().map(|u| u.to_string()).collect();
+                }
+            }
             if let Some(ref search) = state.search {
                 if let Ok(ch) = state.messaging.get_channel(msg.channel_id).await {
                     search
@@ -306,7 +329,7 @@ async fn send_message(
                         .await;
                 }
             }
-            (StatusCode::CREATED, Json(message_json(&msg))).into_response()
+            (StatusCode::CREATED, Json(message_json_with_attachments(&msg, &att_ids))).into_response()
         },
         Err(e) => map_err(e),
     }

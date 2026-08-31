@@ -26,3 +26,5 @@ http = { workspace = true }
 tt-auth = { workspace = true }
 
 tt-search = { workspace = true }
+
+tt-storage = { workspace = true }

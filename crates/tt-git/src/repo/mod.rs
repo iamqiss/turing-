@@ -145,6 +145,9 @@ impl RepoService {
         let path = self.disk_path(workspace_id, name);
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         init_bare_repo(&path, default_branch).await?;
+        if let Err(e) = crate::hooks::install_push_protection_hook(&path).await {
+            tracing::warn!(error = %e, "push protection hook install failed");
+        }
 
         self.store.create(&repo).await?;
         info!(%id, %workspace_id, name, path = %path.display(), "repository created");

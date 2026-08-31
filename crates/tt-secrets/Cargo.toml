@@ -1,0 +1,32 @@
+[package]
+name = "tt-secrets"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Scarlet Letter — envelope-encrypted secrets for orgs, envs, repos; Pearl-safe metadata"
+
+[dependencies]
+tt-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+aes-gcm = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+regex = "1"
+reqwest = { workspace = true }
+hmac = "0.12"
+
+[features]
+default = []
+aws-kms = []

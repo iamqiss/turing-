@@ -4,6 +4,7 @@ pub mod error;
 pub mod repo;
 pub mod smart_http;
 pub mod hooks;
+pub use hooks::{ensure_protection_hook, install_push_protection_hook, pre_commit_hook_script, scan_push_range};
 pub mod pr;
 pub mod issue;
 pub mod merge;

@@ -13,6 +13,8 @@ mod label;
 mod review;
 mod org;
 mod compute;
+mod agent;
+mod scarlet;
 
 pub use principal::*;
 pub use workspace::*;
@@ -27,3 +29,5 @@ pub use label::*;
 pub use review::*;
 pub use org::*;
 pub use compute::*;
+pub use agent::*;
+pub use scarlet::*;

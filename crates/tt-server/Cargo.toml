@@ -49,3 +49,11 @@ tt-compute = { workspace = true }
 tt-net = { workspace = true }
 
 tt-search = { workspace = true }
+
+tt-agents = { workspace = true }
+
+uuid = { workspace = true }
+aes-gcm = "0.10"
+rand = "0.8"
+
+tt-secrets = { workspace = true }

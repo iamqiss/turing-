@@ -1,0 +1,22 @@
+#!/bin/sh
+# Turing Tarpit — Scarlet Letter pre-commit (local)
+set -e
+pat_key='-----BEGIN .*PRIVATE KEY-----'
+pat_akia='AKIA[0-9A-Z]{16}'
+pat_gh='gh[pousr]_[A-Za-z0-9_]{36,}'
+pat_stripe='sk_(live|test)_[0-9a-zA-Z]{20,}'
+pat_conn='(postgres|mysql|mongodb|redis)://[^[:space:]]{8,}'
+
+files=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$files" ] && exit 0
+tmp=$(mktemp)
+for f in $files; do
+  git show ":$f" 2>/dev/null >>"$tmp" || true
+done
+if grep -aEq "$pat_key|$pat_akia|$pat_gh|$pat_stripe|$pat_conn" "$tmp" 2>/dev/null; then
+  echo "Scarlet Letter: secret-shaped string in staged files. Commit blocked." >&2
+  rm -f "$tmp"
+  exit 1
+fi
+rm -f "$tmp"
+exit 0

@@ -10,9 +10,11 @@ use tt_config::Config;
 use tt_git::{IssueService, PullRequestService, RepoService, ReviewService};
 use tt_messaging::{MessagingService, OrgService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
-use tt_storage::{ClickHouseClient, LifecycleStore, ProfileService};
+use tt_storage::{ClickHouseClient, LifecycleStore, MediaService, ProfileService};
 use tt_compute::ComputeService;
 use tt_search::SearchService;
+use tt_agents::AgentHarness;
+use tt_secrets::SecretsService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,4 +38,7 @@ pub struct AppState {
     pub lifecycle: Arc<dyn LifecycleStore>,
     pub realtime: Arc<InMemoryRealtime>,
     pub search: Arc<SearchService>,
+    pub agents: Arc<AgentHarness>,
+    pub scarlet: Arc<SecretsService>,
+    pub media: Arc<MediaService>,
 }

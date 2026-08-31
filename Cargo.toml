@@ -11,6 +11,8 @@ members = [
     "crates/tt-storage",
     "crates/tt-realtime",
     "crates/tt-agents",
+    "crates/tt-secrets",
+    "crates/tt-kms",
     "crates/tt-audit",
     "crates/tt-workflows",
     "crates/tt-notifications",
@@ -71,7 +73,7 @@ gix = { version = "0.70", default-features = false, features = ["max-performance
 meilisearch-sdk = "0.27"
 
 # HTTP / utilities
-axum = "0.7"
+axum = { version = "0.7", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 reqwest = { version = "0.12", features = ["json"] }
@@ -97,6 +99,8 @@ tt-compute = { path = "crates/tt-compute" }
 tt-net = { path = "crates/tt-net" }
 tt-realtime = { path = "crates/tt-realtime" }
 tt-agents = { path = "crates/tt-agents" }
+tt-secrets = { path = "crates/tt-secrets" }
+tt-kms = { path = "crates/tt-kms" }
 tt-audit = { path = "crates/tt-audit" }
 tt-workflows = { path = "crates/tt-workflows" }
 tt-notifications = { path = "crates/tt-notifications" }

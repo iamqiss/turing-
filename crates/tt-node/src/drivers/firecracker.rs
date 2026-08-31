@@ -1,17 +1,4 @@
-//! Firecracker microVM driver.
-//!
-//! Layout per instance:
-//!   {data_dir}/instances/{id}/
-//!     config.json     — Firecracker machine config
-//!     firecracker.pid
-//!     api.sock        — FC API unix socket
-//!     rootfs.ext4     — copy or hardlink from image store
-//!     vmlinux         — kernel (shared path or copy)
-//!
-//! Requires on the host:
-//!   - `firecracker` binary on PATH (or TT_FIRECRACKER_BIN)
-//!   - kernel at TT_FC_KERNEL (default: {data_dir}/images/vmlinux)
-//!   - rootfs templates under {data_dir}/images/{slug}.ext4
+//! Firecracker microVM driver + TAP + DNAT + deploy bake.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -22,7 +9,12 @@ use tokio::fs;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use super::{Driver, DriverError, DriverResult, ResourceSpec};
+use super::{Driver, DriverError, DriverRequest, DriverResult, ResourceSpec};
+use crate::deploy::{bake_rootfs, stage_git};
+use crate::guest_net::GuestNetConfig;
+use crate::bridge::{attach_tap, ensure_bridge};
+use crate::cidata::build_cidata_iso;
+use crate::netfilter::{apply_dnat, clear_dnat, guest_ip_for};
 
 #[derive(Clone)]
 pub struct FirecrackerDriver {
@@ -59,64 +51,125 @@ impl FirecrackerDriver {
         self.images_dir().join(format!("{slug}.ext4"))
     }
 
+    fn tap_name(req: &DriverRequest) -> String {
+        req.tap_device.clone().unwrap_or_else(|| {
+            let hex = req.instance_id.replace('-', "");
+            format!("tt{}", &hex[..hex.len().min(8)])
+        })
+    }
+
+    fn guest_mac(instance_id: &str) -> String {
+        let h: String = instance_id
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect();
+        let pad = format!("{h:0<6}");
+        format!(
+            "AA:FC:00:{}{}:{}{}:{}{}",
+            pad.chars().nth(0).unwrap_or('0'),
+            pad.chars().nth(1).unwrap_or('0'),
+            pad.chars().nth(2).unwrap_or('0'),
+            pad.chars().nth(3).unwrap_or('0'),
+            pad.chars().nth(4).unwrap_or('0'),
+            pad.chars().nth(5).unwrap_or('0'),
+        )
+    }
+
+    async fn ensure_tap(&self, tap: &str) -> Result<(), DriverError> {
+        let exists = Command::new("ip")
+            .args(["link", "show", "dev", tap])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if exists {
+            return Ok(());
+        }
+        match Command::new("ip")
+            .args(["tuntap", "add", "dev", tap, "mode", "tap"])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                let _ = Command::new("ip")
+                    .args(["link", "set", "dev", tap, "up"])
+                    .status()
+                    .await;
+                info!(%tap, "TAP created");
+            }
+            Ok(o) => {
+                warn!(
+                    %tap,
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "TAP create failed"
+                );
+            }
+            Err(e) => warn!(%tap, error = %e, "ip unavailable"),
+        }
+        Ok(())
+    }
+
+    async fn delete_tap(&self, tap: &str) {
+        let _ = Command::new("ip")
+            .args(["link", "del", "dev", tap])
+            .status()
+            .await;
+    }
+
     async fn write_config(
         &self,
         dir: &Path,
         resources: &ResourceSpec,
         rootfs: &Path,
-        socket: &Path,
+        tap: &str,
+        mac: &str,
+        cidata: Option<&Path>,
     ) -> Result<PathBuf, DriverError> {
         let config_path = dir.join("config.json");
-        // Firecracker jailer-less API config (boot-source + drives + machine-config).
-        // Network interfaces are left for a follow-up (tap + CNI); microVMs still boot.
+        let mut drives = vec![json!({
+            "drive_id": "rootfs",
+            "path_on_host": rootfs.to_string_lossy(),
+            "is_root_device": true,
+            "is_read_only": false
+        })];
+        if let Some(iso) = cidata {
+            drives.push(json!({
+                "drive_id": "cidata",
+                "path_on_host": iso.to_string_lossy(),
+                "is_root_device": false,
+                "is_read_only": true
+            }));
+        }
         let cfg = json!({
             "boot-source": {
                 "kernel_image_path": self.kernel_path.to_string_lossy(),
                 "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
             },
-            "drives": [{
-                "drive_id": "rootfs",
-                "path_on_host": rootfs.to_string_lossy(),
-                "is_root_device": true,
-                "is_read_only": false
-            }],
+            "drives": drives,
             "machine-config": {
                 "vcpu_count": resources.vcpu.max(1),
                 "mem_size_mib": resources.memory_mb.max(128),
                 "smt": false
-            }
+            },
+            "network-interfaces": [{
+                "iface_id": "eth0",
+                "guest_mac": mac,
+                "host_dev_name": tap
+            }]
         });
         fs::write(&config_path, serde_json::to_vec_pretty(&cfg).unwrap()).await?;
-        // socket path recorded for operators
-        let _ = socket;
         Ok(config_path)
     }
 
-    async fn read_pid(&self, dir: &Path) -> Option<u32> {
-        let pid_path = dir.join("firecracker.pid");
-        let s = fs::read_to_string(pid_path).await.ok()?;
-        s.trim().parse().ok()
-    }
-
-    async fn write_pid(&self, dir: &Path, pid: u32) -> Result<(), DriverError> {
-        fs::write(dir.join("firecracker.pid"), pid.to_string()).await?;
-        Ok(())
-    }
-
     fn binary_available(&self) -> bool {
-        which(&self.firecracker_bin)
+        let bin = &self.firecracker_bin;
+        if bin.is_absolute() {
+            return bin.exists();
+        }
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|d| d.join(bin).exists()))
+            .unwrap_or(false)
     }
-}
-
-fn which(bin: &Path) -> bool {
-    if bin.is_absolute() {
-        return bin.exists();
-    }
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(bin).exists())
-        })
-        .unwrap_or(false)
 }
 
 #[async_trait]
@@ -127,29 +180,50 @@ impl Driver for FirecrackerDriver {
 
     async fn boot(
         &self,
-        instance_id: &str,
+        req: &DriverRequest,
         resources: &ResourceSpec,
-        image_slug: Option<&str>,
     ) -> Result<DriverResult, DriverError> {
+        let instance_id = &req.instance_id;
         let dir = self.instance_dir(instance_id);
         fs::create_dir_all(&dir).await?;
 
-        let rootfs_src = self.resolve_rootfs(image_slug);
-        let rootfs_dst = dir.join("rootfs.ext4");
-        let socket = dir.join("api.sock");
+        let tap = Self::tap_name(req);
+        let mac = Self::guest_mac(instance_id);
+        let guest_ip = guest_ip_for(instance_id);
+        self.ensure_tap(&tap).await?;
+        ensure_bridge().await;
+        attach_tap(&tap).await;
 
-        // Dry-run / lab mode when assets or binary missing
+        let mut deploy_note = String::new();
+        if let Some(url) = &req.git_clone_url {
+            let outcome = stage_git(&dir, url, req.git_sha.as_deref(), req.deploy_token.as_deref()).await;
+            deploy_note = format!("deploy={}", outcome.status);
+        }
+
+        let meta = json!({
+            "tap": tap,
+            "guest_mac": mac,
+            "guest_ip": guest_ip,
+            "nat_public_ip": req.nat_public_ip,
+            "nat_port_start": req.nat_port_start,
+            "nat_port_end": req.nat_port_end,
+            "git_sha": req.git_sha,
+            "git_clone_url": req.git_clone_url,
+        });
+        fs::write(dir.join("network.json"), serde_json::to_vec_pretty(&meta).unwrap()).await?;
+
+        let gnet_early = GuestNetConfig::from_instance(instance_id, &guest_ip);
+        let _ = gnet_early.write_cloud_init(&dir).await;
+
         if !self.binary_available() {
-            warn!(bin = %self.firecracker_bin.display(), "firecracker binary not found — dry-run boot");
-            let note = format!(
-                "dry-run: install firecracker and set TT_FIRECRACKER_BIN; expected kernel {}",
-                self.kernel_path.display()
-            );
+            warn!("firecracker binary missing — dry-run");
             fs::write(
                 dir.join("status.json"),
                 serde_json::to_vec_pretty(&json!({
                     "status": "dry_run_running",
                     "driver": "firecracker",
+                    "tap": tap,
+                    "guest_ip": guest_ip,
                     "vcpu": resources.vcpu,
                     "memory_mb": resources.memory_mb,
                 }))
@@ -158,41 +232,60 @@ impl Driver for FirecrackerDriver {
             .await?;
             return Ok(DriverResult {
                 accepted: true,
-                instance_id: instance_id.into(),
+                instance_id: instance_id.clone(),
                 driver: "firecracker".into(),
                 action: "boot".into(),
                 pid: None,
                 socket: None,
-                note,
+                tap_device: Some(tap),
+                note: format!("dry-run; {deploy_note}"),
             });
         }
 
         if !self.kernel_path.exists() {
             return Err(DriverError::MissingAsset(format!(
-                "kernel not found at {} (set TT_FC_KERNEL)",
+                "kernel missing: {}",
                 self.kernel_path.display()
             )));
         }
+
+        let rootfs_src = self.resolve_rootfs(req.image_slug.as_deref());
+        let rootfs_dst = dir.join("rootfs.ext4");
         if !rootfs_src.exists() {
             return Err(DriverError::MissingAsset(format!(
-                "rootfs not found at {} — place {{slug}}.ext4 under {}",
-                rootfs_src.display(),
-                self.images_dir().display()
+                "rootfs missing: {}",
+                rootfs_src.display()
             )));
         }
-
-        // Copy rootfs so each instance has a writable disk (hardlink if same fs optional later)
         if !rootfs_dst.exists() {
-            info!(from = %rootfs_src.display(), to = %rootfs_dst.display(), "copying rootfs");
             fs::copy(&rootfs_src, &rootfs_dst).await?;
         }
+        let src_app = dir.join("src");
+        let _ = bake_rootfs(
+            &rootfs_src,
+            &rootfs_dst,
+            if src_app.exists() {
+                Some(src_app.as_path())
+            } else {
+                None
+            },
+            Some(&gnet_early),
+        )
+        .await;
 
+        if let (Some(pub_ip), Some(ps), Some(pe)) =
+            (&req.nat_public_ip, req.nat_port_start, req.nat_port_end)
+        {
+            let _ = apply_dnat(pub_ip, &guest_ip, ps, pe).await;
+        }
+
+        let cidata = build_cidata_iso(&dir).await;
+        let socket = dir.join("api.sock");
         let _ = fs::remove_file(&socket).await;
         let config = self
-            .write_config(&dir, resources, &rootfs_dst, &socket)
+            .write_config(&dir, resources, &rootfs_dst, &tap, &mac, cidata.as_deref())
             .await?;
 
-        // firecracker --api-sock PATH --config-file PATH
         let mut child = Command::new(&self.firecracker_bin)
             .arg("--api-sock")
             .arg(&socket)
@@ -210,51 +303,64 @@ impl Driver for FirecrackerDriver {
             .map_err(|e| DriverError::Other(format!("spawn firecracker: {e}")))?;
 
         let pid = child.id().unwrap_or(0);
-        self.write_pid(&dir, pid).await?;
-
-        // Detach: drop child without waiting — process keeps running
+        fs::write(dir.join("firecracker.pid"), pid.to_string()).await?;
         std::mem::forget(child);
 
-        info!(%instance_id, %pid, socket = %socket.display(), "firecracker booted");
+        info!(%instance_id, %pid, %tap, %guest_ip, "firecracker booted");
         Ok(DriverResult {
             accepted: true,
-            instance_id: instance_id.into(),
+            instance_id: instance_id.clone(),
             driver: "firecracker".into(),
             action: "boot".into(),
             pid: Some(pid),
             socket: Some(socket.to_string_lossy().into()),
-            note: "firecracker process started".into(),
+            tap_device: Some(tap),
+            note: format!("firecracker+TAP+DNAT; {deploy_note}"),
         })
     }
 
     async fn stop(&self, instance_id: &str) -> Result<DriverResult, DriverError> {
         let dir = self.instance_dir(instance_id);
-        if let Some(pid) = self.read_pid(&dir).await {
-            kill_pid(pid);
+        let net: Option<serde_json::Value> = fs::read_to_string(dir.join("network.json"))
+            .await
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let tap = net
+            .as_ref()
+            .and_then(|v| v.get("tap").and_then(|t| t.as_str().map(str::to_string)));
+
+        if let Ok(pid_s) = fs::read_to_string(dir.join("firecracker.pid")).await {
+            if let Ok(pid) = pid_s.trim().parse::<u32>() {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status()
+                    .await;
+            }
             let _ = fs::remove_file(dir.join("firecracker.pid")).await;
-            info!(%instance_id, %pid, "firecracker stopped");
-            Ok(DriverResult {
-                accepted: true,
-                instance_id: instance_id.into(),
-                driver: "firecracker".into(),
-                action: "stop".into(),
-                pid: Some(pid),
-                socket: None,
-                note: "sent SIGTERM".into(),
-            })
-        } else {
-            // dry-run cleanup
-            let _ = fs::remove_file(dir.join("status.json")).await;
-            Ok(DriverResult {
-                accepted: true,
-                instance_id: instance_id.into(),
-                driver: "firecracker".into(),
-                action: "stop".into(),
-                pid: None,
-                socket: None,
-                note: "no pid file (dry-run or already stopped)".into(),
-            })
         }
+        if let Some(ref t) = tap {
+            self.delete_tap(t).await;
+        }
+        if let Some(v) = net {
+            if let (Some(pip), Some(ps), Some(pe)) = (
+                v.get("nat_public_ip").and_then(|x| x.as_str()),
+                v.get("nat_port_start").and_then(|x| x.as_u64()),
+                v.get("nat_port_end").and_then(|x| x.as_u64()),
+            ) {
+                clear_dnat(pip, &guest_ip_for(instance_id), ps as u16, pe as u16).await;
+            }
+        }
+        let _ = fs::remove_file(dir.join("status.json")).await;
+        Ok(DriverResult {
+            accepted: true,
+            instance_id: instance_id.into(),
+            driver: "firecracker".into(),
+            action: "stop".into(),
+            pid: None,
+            socket: None,
+            tap_device: tap,
+            note: "stopped".into(),
+        })
     }
 
     async fn destroy(&self, instance_id: &str) -> Result<DriverResult, DriverError> {
@@ -270,30 +376,8 @@ impl Driver for FirecrackerDriver {
             action: "destroy".into(),
             pid: None,
             socket: None,
-            note: "instance directory removed".into(),
+            tap_device: None,
+            note: "destroyed".into(),
         })
     }
-}
-
-fn kill_pid(pid: u32) {
-    #[cfg(unix)]
-    {
-        unsafe {
-            libc_kill(pid as i32, 15); // SIGTERM
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
-}
-
-#[cfg(unix)]
-fn libc_kill(pid: i32, sig: i32) {
-    // Avoid nix dep by using libc via std::process on failure path
-    use std::process::Command;
-    let _ = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status();
-    let _ = sig;
 }

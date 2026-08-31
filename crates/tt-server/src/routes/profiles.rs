@@ -3,9 +3,9 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch};
+use axum::routing::{get};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use tt_auth::extract_bearer;
 use tt_core::ids::PrincipalId;
 

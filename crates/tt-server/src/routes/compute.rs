@@ -3,7 +3,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, patch};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tt_auth::extract_bearer;
@@ -27,6 +27,16 @@ pub fn router() -> Router<AppState> {
         .route("/api/workloads/:id/instances", get(list_instances))
         .route("/api/instances/:id", get(get_instance))
         .route("/api/compute/networks/shared-nat", post(register_nat))
+        .route("/api/orgs/:slug/deploy", post(deploy))
+        .route(
+            "/api/orgs/:slug/compute-quota",
+            get(get_quota).patch(patch_quota),
+        )
+        .route(
+            "/api/orgs/:slug/lifecycle-events",
+            get(list_lifecycle),
+        )
+        .route("/api/compute/lifecycle-events", get(list_platform_lifecycle))
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +91,30 @@ fn default_disk() -> u32 {
 #[derive(Debug, Deserialize)]
 pub struct HeartbeatBody {
     pub endpoint: String,
+    /// Node agent token from registration (tt_node_...)
+    pub agent_token: Option<String>,
+}
+
+async fn require_org_member(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+) -> Result<(tt_auth::AuthContext, tt_core::domain::Org), StatusCode> {
+    let ctx = require_auth(state, headers).await?;
+    let org = state
+        .orgs
+        .get_by_slug(slug)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    state
+        .orgs
+        .require_active_member(org.id, ctx.principal_id())
+        .await
+        .map_err(|e| match e {
+            tt_messaging::MessagingError::Forbidden(_) => StatusCode::FORBIDDEN,
+            _ => StatusCode::NOT_FOUND,
+        })?;
+    Ok((ctx, org))
 }
 
 async fn require_auth(
@@ -103,6 +137,7 @@ fn map_err(e: ComputeError) -> axum::response::Response {
     match e {
         ComputeError::NotFound => StatusCode::NOT_FOUND.into_response(),
         ComputeError::InvalidArgument(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+        ComputeError::Forbidden(m) => (StatusCode::FORBIDDEN, m).into_response(),
         ComputeError::QuotaExceeded(m) | ComputeError::NoCapacity(m) | ComputeError::Conflict(m) => {
             (StatusCode::CONFLICT, m).into_response()
         }
@@ -138,7 +173,7 @@ async fn register_node(
         )
         .await
     {
-        Ok(n) => (
+        Ok((n, agent_token)) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
                 "id": n.id.to_string(),
@@ -149,6 +184,8 @@ async fn register_node(
                 "capacity_1vcpu": n.capacity_1vcpu(),
                 "overcommit_ratio": n.overcommit_ratio,
                 "status": n.status.as_str(),
+                // Shown once — store securely on the metal host (TT_NODE_AGENT_TOKEN)
+                "agent_token": agent_token,
             })),
         )
             .into_response(),
@@ -196,7 +233,7 @@ async fn heartbeat(
         Ok(i) => i,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    match state.compute.heartbeat(nid, &body.endpoint).await {
+    match state.compute.heartbeat(nid, &body.endpoint, body.agent_token.as_deref()).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => map_err(e),
     }
@@ -308,25 +345,36 @@ async fn get_workload(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_auth(&state, &headers).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
     let wid: WorkloadId = match id.parse() {
         Ok(i) => i,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     match state.compute.get_workload(wid).await {
-        Ok(w) => Json(serde_json::json!({
-            "id": w.id.to_string(),
-            "org_id": w.org_id.to_string(),
-            "name": w.name,
-            "shape": w.shape.as_str(),
-            "status": w.status.as_str(),
-            "region": w.region.as_str(),
-            "resources": w.resources,
-            "git_ref": w.git_ref,
-        }))
-        .into_response(),
+        Ok(w) => {
+            if state
+                .orgs
+                .require_active_member(w.org_id, ctx.principal_id())
+                .await
+                .is_err()
+            {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            Json(serde_json::json!({
+                "id": w.id.to_string(),
+                "org_id": w.org_id.to_string(),
+                "name": w.name,
+                "shape": w.shape.as_str(),
+                "status": w.status.as_str(),
+                "region": w.region.as_str(),
+                "resources": w.resources,
+                "git_ref": w.git_ref,
+            }))
+            .into_response()
+        }
         Err(e) => map_err(e),
     }
 }
@@ -336,13 +384,27 @@ async fn start_workload(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_auth(&state, &headers).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
     let wid: WorkloadId = match id.parse() {
         Ok(i) => i,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    let wl = match state.compute.get_workload(wid).await {
+        Ok(w) => w,
+        Err(e) => return map_err(e),
+    };
+    // Tenant isolation: foreign org → uniform 404
+    if state
+        .orgs
+        .require_active_member(wl.org_id, ctx.principal_id())
+        .await
+        .is_err()
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     match state.compute.start(wid).await {
         Ok(inst) => Json(serde_json::json!({
             "instance_id": inst.id.to_string(),
@@ -364,13 +426,26 @@ async fn stop_workload(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_auth(&state, &headers).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
     let wid: WorkloadId = match id.parse() {
         Ok(i) => i,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    let wl = match state.compute.get_workload(wid).await {
+        Ok(w) => w,
+        Err(e) => return map_err(e),
+    };
+    if state
+        .orgs
+        .require_active_member(wl.org_id, ctx.principal_id())
+        .await
+        .is_err()
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     match state.compute.stop(wid).await {
         Ok(()) => Json(serde_json::json!({ "stopped": true })).into_response(),
         Err(e) => map_err(e),
@@ -482,5 +557,250 @@ async fn get_instance(
         }))
         .into_response(),
         Err(e) => map_err(e),
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct DeployBody {
+    pub name: String,
+    pub shape: String,
+    pub region: String,
+    pub repository_id: String,
+    pub git_ref: String,
+    pub git_sha: Option<String>,
+    #[serde(default = "default_vcpu")]
+    pub vcpu: u32,
+    #[serde(default = "default_mem")]
+    pub memory_mb: u32,
+    #[serde(default = "default_disk")]
+    pub disk_gb: u32,
+}
+
+async fn deploy(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<DeployBody>,
+) -> impl IntoResponse {
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Some(shape) = WorkloadShape::parse(&body.shape) else {
+        return (StatusCode::BAD_REQUEST, "shape: serverless|vm|kata").into_response();
+    };
+    let Some(region) = RegionCode::parse(&body.region) else {
+        return (StatusCode::BAD_REQUEST, "invalid region").into_response();
+    };
+    let repo_id = match body.repository_id.parse() {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid repository_id").into_response(),
+    };
+    match state
+        .compute
+        .deploy_from_git(
+            org.id,
+            ctx.principal_id(),
+            body.name,
+            shape,
+            region,
+            ResourceSpec {
+                vcpu: body.vcpu,
+                memory_mb: body.memory_mb,
+                disk_gb: body.disk_gb,
+            },
+            repo_id,
+            body.git_ref,
+            body.git_sha,
+            None,
+        )
+        .await
+    {
+        Ok((w, inst)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "workload_id": w.id.to_string(),
+                "instance_id": inst.id.to_string(),
+                "status": inst.status.as_str(),
+                "driver": inst.driver.as_str(),
+                "nat_public_ip": inst.nat_public_ip,
+                "nat_port_start": inst.nat_port_start,
+                "nat_port_end": inst.nat_port_end,
+                "git_ref": w.git_ref,
+            })),
+        )
+            .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct PatchQuotaBody {
+    pub max_workloads: Option<u32>,
+    pub max_vcpu_total: Option<u32>,
+    pub max_concurrent_running: Option<u32>,
+}
+
+async fn get_quota(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_auth(&state, &headers).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    match state.compute.get_quota_usage(org.id).await {
+        Ok(q) => Json(serde_json::json!({
+            "org_id": org.id.to_string(),
+            "slug": slug,
+            "max_workloads": q.max_workloads,
+            "max_vcpu_total": q.max_vcpu_total,
+            "max_concurrent_running": q.max_concurrent_running,
+            "workloads_used": q.workloads_used,
+            "vcpu_used": q.vcpu_used,
+            "running_used": q.running_used,
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+async fn patch_quota(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<PatchQuotaBody>,
+) -> impl IntoResponse {
+    if require_auth(&state, &headers).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    // Merge with current limits
+    let cur = match state.compute.get_quota_usage(org.id).await {
+        Ok(q) => q,
+        Err(e) => return map_err(e),
+    };
+    let max_workloads = body.max_workloads.unwrap_or(cur.max_workloads);
+    let max_vcpu_total = body.max_vcpu_total.unwrap_or(cur.max_vcpu_total);
+    let max_concurrent_running = body
+        .max_concurrent_running
+        .unwrap_or(cur.max_concurrent_running);
+    match state
+        .compute
+        .set_quota(org.id, max_workloads, max_vcpu_total, max_concurrent_running)
+        .await
+    {
+        Ok(q) => Json(serde_json::json!({
+            "org_id": org.id.to_string(),
+            "slug": slug,
+            "max_workloads": q.max_workloads,
+            "max_vcpu_total": q.max_vcpu_total,
+            "max_concurrent_running": q.max_concurrent_running,
+            "workloads_used": q.workloads_used,
+            "vcpu_used": q.vcpu_used,
+            "running_used": q.running_used,
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct LifecycleQuery {
+    pub days: Option<u32>,
+    pub limit: Option<u32>,
+}
+
+async fn list_lifecycle(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(q): Query<LifecycleQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_auth(&state, &headers).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let days = q.days.unwrap_or(30).min(365);
+    let limit = q.limit.unwrap_or(100).min(500);
+    let since = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    match state.lifecycle.list_for_org(org.id, since, limit).await {
+        Ok(events) => Json(
+            events
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id.to_string(),
+                        "ts": e.ts.to_rfc3339(),
+                        "kind": e.kind.as_str(),
+                        "org_id": e.org_id.map(|id| id.to_string()),
+                        "principal_id": e.principal_id.map(|id| id.to_string()),
+                        "workload_id": e.workload_id.map(|id| id.to_string()),
+                        "instance_id": e.instance_id.map(|id| id.to_string()),
+                        "node_id": e.node_id.map(|id| id.to_string()),
+                        "region": e.region,
+                        "metadata": e.metadata,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "list lifecycle");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn list_platform_lifecycle(
+    State(state): State<AppState>,
+    Query(q): Query<LifecycleQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_auth(&state, &headers).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let days = q.days.unwrap_or(30).min(365);
+    let limit = q.limit.unwrap_or(100).min(500);
+    let since = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    match state.lifecycle.list_platform(since, limit).await {
+        Ok(events) => Json(
+            events
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id.to_string(),
+                        "ts": e.ts.to_rfc3339(),
+                        "kind": e.kind.as_str(),
+                        "org_id": e.org_id.map(|id| id.to_string()),
+                        "node_id": e.node_id.map(|id| id.to_string()),
+                        "region": e.region,
+                        "metadata": e.metadata,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "list platform lifecycle");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }

@@ -3,6 +3,11 @@
 //! Drivers: Firecracker (C1b), Cloud Hypervisor (stub), Kata (stub).
 
 mod drivers;
+mod deploy;
+mod netfilter;
+mod guest_net;
+mod bridge;
+mod cidata;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

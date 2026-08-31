@@ -6,9 +6,11 @@
 pub mod error;
 pub mod clickhouse;
 pub mod events;
+pub mod lifecycle;
 pub mod profile;
 
 pub use error::{Result, StorageError};
 pub use events::{ContributionStore, PostgresContributionStore};
+pub use lifecycle::{LifecycleStore, PostgresLifecycleStore, new_lifecycle};
 pub use clickhouse::ClickHouseClient;
 pub use profile::{ProfileService, PostgresProfileStore, ProfileStore};

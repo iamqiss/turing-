@@ -17,6 +17,15 @@ pub struct NodeCommand {
     pub action: NodeAction,
     pub resources: ResourceSpec,
     pub image_slug: Option<String>,
+    /// Host TAP name (e.g. tt-tap-a1b2)
+    pub tap_device: Option<String>,
+    pub nat_public_ip: Option<String>,
+    pub nat_port_start: Option<u16>,
+    pub nat_port_end: Option<u16>,
+    /// Deploy context
+    pub git_clone_url: Option<String>,
+    pub git_sha: Option<String>,
+    pub deploy_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +42,6 @@ pub trait HypervisorProvider: Send + Sync {
     async fn dispatch(&self, node_endpoint: &str, cmd: NodeCommand) -> Result<(), ProviderError>;
 }
 
-/// Lab / offline: accept without calling a node.
 pub struct NullProvider;
 
 #[async_trait]
@@ -49,7 +57,6 @@ impl HypervisorProvider for NullProvider {
     }
 }
 
-/// POST `{endpoint}/v1/command` on tt-node.
 pub struct HttpProvider {
     client: reqwest::Client,
 }
@@ -58,7 +65,7 @@ impl HttpProvider {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .expect("reqwest client"),
         }
@@ -91,6 +98,13 @@ impl HypervisorProvider for HttpProvider {
                 "disk_gb": cmd.resources.disk_gb,
             },
             "image_slug": cmd.image_slug,
+            "tap_device": cmd.tap_device,
+            "nat_public_ip": cmd.nat_public_ip,
+            "nat_port_start": cmd.nat_port_start,
+            "nat_port_end": cmd.nat_port_end,
+            "git_clone_url": cmd.git_clone_url,
+            "git_sha": cmd.git_sha,
+            "deploy_token": cmd.deploy_token,
         });
         let res = self
             .client
@@ -102,15 +116,9 @@ impl HypervisorProvider for HttpProvider {
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
-            return Err(ProviderError::Message(format!(
-                "tt-node {status}: {text}"
-            )));
+            return Err(ProviderError::Message(format!("tt-node {status}: {text}")));
         }
-        tracing::info!(
-            instance = %cmd.instance_id,
-            %url,
-            "dispatched to tt-node"
-        );
+        tracing::info!(instance = %cmd.instance_id, %url, "dispatched to tt-node");
         Ok(())
     }
 }

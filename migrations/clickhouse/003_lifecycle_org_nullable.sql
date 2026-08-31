@@ -1,0 +1,2 @@
+-- Note: ClickHouse cannot easily ALTER Nullability; new clusters use Nullable org_id in 002.
+-- For existing tables, inserts still send org_id string or null via JSONEachRow.

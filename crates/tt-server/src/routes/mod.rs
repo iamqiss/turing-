@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         repos: state.repos.clone(),
         resolver: state.principal_resolver.clone(),
         push_tx: Some(push_tx),
+        deploy_pool: Some(state.db.clone()),
     };
     let msg_state = MessagingHttpState {
         messaging: state.messaging.clone(),

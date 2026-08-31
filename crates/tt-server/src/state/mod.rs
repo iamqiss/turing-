@@ -10,7 +10,7 @@ use tt_config::Config;
 use tt_git::{IssueService, PullRequestService, RepoService, ReviewService};
 use tt_messaging::{MessagingService, OrgService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
-use tt_storage::{ClickHouseClient, ProfileService};
+use tt_storage::{ClickHouseClient, LifecycleStore, ProfileService};
 use tt_compute::ComputeService;
 
 #[derive(Clone)]
@@ -32,5 +32,6 @@ pub struct AppState {
     pub compute: Arc<ComputeService>,
     pub profiles: Arc<ProfileService>,
     pub clickhouse: Arc<ClickHouseClient>,
+    pub lifecycle: Arc<dyn LifecycleStore>,
     pub realtime: Arc<InMemoryRealtime>,
 }

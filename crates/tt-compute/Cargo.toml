@@ -21,3 +21,4 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
+sha2 = "0.10"

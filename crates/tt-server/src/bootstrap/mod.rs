@@ -13,11 +13,23 @@ use tt_git::{IssueService, PostgresIssueStore, PostgresLabelStore, PostgresPullR
 use tt_messaging::{MessagingService, OrgService, PostgresMessageStore, PostgresOrgStore, PostgresWorkspaceStore, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_config::Config;
-use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresProfileStore, ProfileService};
-use tt_compute::{ComputeService, HttpProvider, PostgresComputeStore};
+use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresLifecycleStore, PostgresProfileStore, ProfileService, LifecycleStore};
+use tt_compute::{ComputeService, HttpProvider, Orchestrator, OrchestratorConfig, PostgresComputeStore};
 use tt_net::PostgresIpAllocator;
 
 use crate::state::AppState;
+
+struct LcEmit(std::sync::Arc<dyn LifecycleStore>);
+
+#[async_trait::async_trait]
+impl tt_compute::LifecycleEmitter for LcEmit {
+    async fn emit(&self, event: tt_core::domain::LifecycleEvent) {
+        if let Err(e) = self.0.record(&event).await {
+            tracing::warn!(error = %e, "lifecycle emit failed");
+        }
+    }
+}
+
 
 pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let config = Arc::new(config);
@@ -123,16 +135,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let orgs = Arc::new(OrgService::new(org_store, db.clone()));
     info!("orgs ready");
 
-    let compute_store = Arc::new(PostgresComputeStore::new(db.clone()));
-    let ip_alloc = Arc::new(PostgresIpAllocator::new(db.clone()));
-    let compute = Arc::new(ComputeService::new(
-        compute_store,
-        ip_alloc,
-        Arc::new(HttpProvider::new()),
-    ));
-    info!("compute ready (HTTP → tt-node)");
-
-    // --- Profiles + contribution analytics ---
+    // --- ClickHouse (contribution + lifecycle dual-write) ---
     let ch = {
         let client = ClickHouseClient::new(
             config.clickhouse_url.clone(),
@@ -141,9 +144,14 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         match tokio::time::timeout(std::time::Duration::from_secs(2), client.ping()).await {
             Ok(Ok(())) => {
                 info!("clickhouse reachable");
-                if let Ok(sql) = std::fs::read_to_string("migrations/clickhouse/001_contribution_events.sql") {
-                    if let Err(e) = client.ensure_schema(&sql).await {
-                        warn!(error = %e, "clickhouse schema apply failed");
+                for path in [
+                    "migrations/clickhouse/001_contribution_events.sql",
+                    "migrations/clickhouse/002_lifecycle_events.sql",
+                ] {
+                    if let Ok(sql) = std::fs::read_to_string(path) {
+                        if let Err(e) = client.ensure_schema(&sql).await {
+                            warn!(error = %e, %path, "clickhouse schema apply failed");
+                        }
                     }
                 }
                 Arc::new(client)
@@ -158,11 +166,37 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             }
         }
     };
+
+    let lifecycle_store: Arc<dyn LifecycleStore> = Arc::new(PostgresLifecycleStore::new(
+        db.clone(),
+        ch.clone(),
+    ));
+    let compute_store = Arc::new(PostgresComputeStore::new(db.clone()));
+    let ip_alloc = Arc::new(PostgresIpAllocator::new(db.clone()));
+    let public_base = config.webauthn_rp_origin.clone();
+    let compute = Arc::new(
+        ComputeService::new(
+            compute_store,
+            ip_alloc,
+            Arc::new(HttpProvider::new()),
+            public_base,
+        )
+        .with_lifecycle(Arc::new(LcEmit(lifecycle_store.clone()))),
+    );
+    info!("compute ready (HTTP → tt-node)");
+
+    let orch = Orchestrator::new(
+        Arc::new(PostgresComputeStore::new(db.clone())),
+        Some(Arc::new(LcEmit(lifecycle_store.clone()))),
+        OrchestratorConfig::default(),
+    );
+    let _orch_shutdown = orch.spawn();
+    info!("orchestrator spawned");
+
     let contrib = Arc::new(PostgresContributionStore::new(db.clone(), ch.clone()));
     let profile_store = Arc::new(PostgresProfileStore::new(db.clone()));
     let profiles = Arc::new(ProfileService::new(profile_store, contrib, db.clone()));
     info!("profiles ready");
-
 
     Ok(AppState {
         config,
@@ -182,6 +216,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         compute,
         profiles,
         clickhouse: ch,
+        lifecycle: lifecycle_store,
         realtime,
     })
 }

@@ -28,3 +28,6 @@ tower = { workspace = true }
 tt-auth = { workspace = true }
 
 regex = "1"
+
+sha2 = "0.10"
+base64 = "0.22"

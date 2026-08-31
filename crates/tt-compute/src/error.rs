@@ -14,6 +14,8 @@ pub enum ComputeError {
     InvalidArgument(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("provider: {0}")]
     Provider(String),
     #[error(transparent)]

@@ -8,12 +8,32 @@ use tt_net::IpAllocator;
 
 use crate::error::{ComputeError, Result};
 use crate::provider::{HypervisorProvider, NodeAction, NodeCommand};
+use crate::security::{self, assert_workload_org};
 use crate::store::ComputeStore;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QuotaUsage {
+    pub max_workloads: u32,
+    pub max_vcpu_total: u32,
+    pub max_concurrent_running: u32,
+    pub workloads_used: u32,
+    pub vcpu_used: u32,
+    pub running_used: u32,
+}
 
 pub struct ComputeService {
     store: Arc<dyn ComputeStore>,
     net: Arc<dyn IpAllocator>,
     provider: Arc<dyn HypervisorProvider>,
+    /// e.g. http://control.example:8080 — used to build Smart HTTP clone URLs
+    public_base_url: String,
+    lifecycle: Option<Arc<dyn LifecycleEmitter>>,
+}
+
+/// Thin adapter so tt-compute does not depend on tt-storage.
+#[async_trait::async_trait]
+pub trait LifecycleEmitter: Send + Sync {
+    async fn emit(&self, event: LifecycleEvent);
 }
 
 impl ComputeService {
@@ -21,12 +41,88 @@ impl ComputeService {
         store: Arc<dyn ComputeStore>,
         net: Arc<dyn IpAllocator>,
         provider: Arc<dyn HypervisorProvider>,
+        public_base_url: String,
     ) -> Self {
         Self {
             store,
             net,
             provider,
+            public_base_url: public_base_url.trim_end_matches('/').to_string(),
+            lifecycle: None,
         }
+    }
+
+    pub fn with_lifecycle(mut self, emitter: Arc<dyn LifecycleEmitter>) -> Self {
+        self.lifecycle = Some(emitter);
+        self
+    }
+
+    async fn emit(&self, ev: LifecycleEvent) {
+        if let Some(ref lc) = self.lifecycle {
+            lc.emit(ev).await;
+        }
+    }
+
+    fn lc(
+        org_id: Option<OrgId>,
+        kind: LifecycleKind,
+        principal_id: Option<PrincipalId>,
+    ) -> LifecycleEvent {
+        LifecycleEvent {
+            id: uuid::Uuid::now_v7(),
+            ts: Utc::now(),
+            org_id,
+            principal_id,
+            kind,
+            workload_id: None,
+            instance_id: None,
+            node_id: None,
+            region: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    async fn resolve_clone_url(&self, repository_id: Option<RepositoryId>) -> Option<String> {
+        let rid = repository_id?;
+        let (ws, name) = self.store.repo_clone_coords(rid).await.ok().flatten()?;
+        Some(format!(
+            "{}/git/{}/{}",
+            self.public_base_url,
+            ws,
+            name
+        ))
+    }
+
+    async fn mint_deploy_token(
+        &self,
+        org_id: OrgId,
+        repository_id: Option<RepositoryId>,
+        principal_id: PrincipalId,
+    ) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let secret = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let prefix = secret.chars().take(8).collect::<String>();
+        let hash = format!("{:x}", Sha256::digest(secret.as_bytes()));
+        let id = uuid::Uuid::now_v7();
+        let exp = Utc::now() + chrono::Duration::hours(2);
+        if self
+            .store
+            .insert_deploy_token(
+                id,
+                org_id,
+                repository_id,
+                principal_id,
+                &hash,
+                &prefix,
+                exp,
+            )
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        // Wire format: tt_deploy_{prefix}_{secret}
+        Some(format!("tt_deploy_{prefix}_{secret}"))
     }
 
     pub async fn register_node(
@@ -38,7 +134,7 @@ impl ComputeService {
         reserved_cores: u32,
         reserved_memory_mb: u32,
         overcommit_ratio: f32,
-    ) -> Result<ComputeNode> {
+    ) -> Result<(ComputeNode, String)> {
         if physical_cores == 0 || memory_mb == 0 {
             return Err(ComputeError::InvalidArgument(
                 "physical_cores and memory_mb required".into(),
@@ -68,6 +164,24 @@ impl ComputeService {
             created_at: Utc::now(),
         };
         self.store.insert_node(&node).await?;
+        let (plaintext, hash, prefix) = security::mint_agent_token();
+        self.store
+            .set_node_agent_token(node.id, &hash, &prefix)
+            .await?;
+        {
+            let mut ev = Self::lc(None, LifecycleKind::NodeRegistered, None);
+            ev.node_id = Some(node.id);
+            ev.region = Some(node.region.as_str().into());
+            ev.metadata = serde_json::json!({
+                "name": node.name,
+                "physical_cores": node.physical_cores,
+                "memory_mb": node.memory_mb,
+                "sellable_cores": node.sellable_cores(),
+                "capacity_1vcpu": node.capacity_1vcpu(),
+                "overcommit_ratio": node.overcommit_ratio,
+            });
+            self.emit(ev).await;
+        }
         info!(
             node = %node.id,
             cores = physical_cores,
@@ -75,15 +189,69 @@ impl ComputeService {
             cap_1vcpu = node.capacity_1vcpu(),
             "compute node registered"
         );
-        Ok(node)
+        Ok((node, plaintext))
     }
 
     pub async fn list_nodes(&self, region: Option<RegionCode>) -> Result<Vec<ComputeNode>> {
         self.store.list_nodes(region).await
     }
 
-    pub async fn heartbeat(&self, node_id: NodeId, endpoint: &str) -> Result<()> {
-        self.store.heartbeat(node_id, endpoint).await
+    pub async fn heartbeat(
+        &self,
+        node_id: NodeId,
+        endpoint: &str,
+        agent_token: Option<&str>,
+    ) -> Result<()> {
+        // Agent must present token once issued (bootstrap allows empty only if no hash)
+        if let Some(tok) = agent_token {
+            if !self.store.verify_node_agent_token(node_id, tok).await? {
+                return Err(ComputeError::Forbidden("invalid node agent token".into()));
+            }
+        } else {
+            // Require token if one is configured
+            let ok = self.store.verify_node_agent_token(node_id, "").await?;
+            // verify with empty: if hash exists, fails; if no hash, ok
+            if !ok {
+                return Err(ComputeError::Forbidden("node agent token required".into()));
+            }
+        }
+        self.store.heartbeat(node_id, endpoint).await?;
+        {
+            let mut ev = Self::lc(None, LifecycleKind::NodeReady, None);
+            ev.node_id = Some(node_id);
+            ev.metadata = serde_json::json!({ "endpoint": endpoint });
+            self.emit(ev).await;
+        }
+        Ok(())
+    }
+
+    /// Tenant isolation: load workload and ensure it belongs to org.
+    pub async fn get_workload_for_org(
+        &self,
+        org_id: OrgId,
+        workload_id: WorkloadId,
+    ) -> Result<Workload> {
+        let wl = self.get_workload(workload_id).await?;
+        assert_workload_org(&wl, org_id)?;
+        Ok(wl)
+    }
+
+    pub async fn start_for_org(
+        &self,
+        org_id: OrgId,
+        workload_id: WorkloadId,
+    ) -> Result<Instance> {
+        let _ = self.get_workload_for_org(org_id, workload_id).await?;
+        self.start(workload_id).await
+    }
+
+    pub async fn stop_for_org(
+        &self,
+        org_id: OrgId,
+        workload_id: WorkloadId,
+    ) -> Result<()> {
+        let _ = self.get_workload_for_org(org_id, workload_id).await?;
+        self.stop(workload_id).await
     }
 
     pub async fn create_workload(
@@ -109,16 +277,33 @@ impl ComputeService {
         let (max_wl, max_vcpu, _) = self.store.get_quota(org_id).await?;
         let used = self.store.count_org_workloads(org_id).await?;
         if used >= max_wl {
-            return Err(ComputeError::QuotaExceeded(format!(
-                "max workloads {max_wl}"
-            )));
+            let msg = format!("workload limit: {used}/{max_wl}");
+            let mut ev = Self::lc(Some(org_id), LifecycleKind::QuotaExceeded, Some(created_by));
+            ev.region = Some(region.as_str().into());
+            ev.metadata = serde_json::json!({
+                "reason": "max_workloads",
+                "used": used,
+                "max": max_wl,
+            });
+            self.emit(ev).await;
+            return Err(ComputeError::QuotaExceeded(msg));
         }
-        // rough: sum not fully tracked yet — gate on single workload size
-        if resources.vcpu > max_vcpu {
-            return Err(ComputeError::QuotaExceeded(format!(
-                "vcpu {0} > org max {max_vcpu}",
+        let vcpu_used = self.store.sum_org_vcpu(org_id).await?;
+        if vcpu_used + resources.vcpu > max_vcpu {
+            let msg = format!(
+                "vcpu limit: {vcpu_used}+{} would exceed {max_vcpu}",
                 resources.vcpu
-            )));
+            );
+            let mut ev = Self::lc(Some(org_id), LifecycleKind::QuotaExceeded, Some(created_by));
+            ev.region = Some(region.as_str().into());
+            ev.metadata = serde_json::json!({
+                "reason": "max_vcpu_total",
+                "vcpu_used": vcpu_used,
+                "requested": resources.vcpu,
+                "max": max_vcpu,
+            });
+            self.emit(ev).await;
+            return Err(ComputeError::QuotaExceeded(msg));
         }
 
         let now = Utc::now();
@@ -139,6 +324,26 @@ impl ComputeService {
             updated_at: now,
         };
         self.store.insert_workload(&wl).await?;
+        {
+            let mut ev = LifecycleEvent {
+                id: uuid::Uuid::now_v7(),
+                ts: Utc::now(),
+                org_id: Some(wl.org_id),
+                principal_id: Some(wl.created_by),
+                kind: LifecycleKind::WorkloadCreated,
+                workload_id: Some(wl.id),
+                instance_id: None,
+                node_id: None,
+                region: Some(wl.region.as_str().into()),
+                metadata: serde_json::json!({
+                    "name": wl.name,
+                    "shape": wl.shape.as_str(),
+                    "vcpu": wl.resources.vcpu,
+                }),
+            };
+            let _ = &mut ev;
+            self.emit(ev).await;
+        }
         info!(workload = %wl.id, shape = wl.shape.as_str(), "workload created");
         Ok(wl)
     }
@@ -167,16 +372,43 @@ impl ComputeService {
             )));
         }
 
+        let (_, _, max_running) = self.store.get_quota(wl.org_id).await?;
+        let running = self.store.count_org_running(wl.org_id).await?;
+        // This workload is not yet running/scheduled — ensure room for one more.
+        if !matches!(wl.status, WorkloadStatus::Scheduled | WorkloadStatus::Running)
+            && running >= max_running
+        {
+            let msg = format!("concurrent running limit: {running}/{max_running}");
+            let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::QuotaExceeded, Some(wl.created_by));
+            ev.workload_id = Some(wl.id);
+            ev.region = Some(wl.region.as_str().into());
+            ev.metadata = serde_json::json!({
+                "reason": "max_concurrent_running",
+                "running": running,
+                "max": max_running,
+            });
+            self.emit(ev).await;
+            return Err(ComputeError::QuotaExceeded(msg));
+        }
+
         let nodes = self.store.list_nodes(Some(wl.region)).await?;
-        let node = nodes
-            .into_iter()
-            .find(|n| n.status == NodeStatus::Ready)
-            .ok_or_else(|| {
-                ComputeError::NoCapacity(format!(
+        let node = match nodes.into_iter().find(|n| n.status == NodeStatus::Ready) {
+            Some(n) => n,
+            None => {
+                let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::InstanceFailed, Some(wl.created_by));
+                ev.workload_id = Some(wl.id);
+                ev.region = Some(wl.region.as_str().into());
+                ev.metadata = serde_json::json!({
+                    "reason": "no_ready_node",
+                    "region": wl.region.as_str(),
+                });
+                self.emit(ev).await;
+                return Err(ComputeError::NoCapacity(format!(
                     "no ready node in {}",
                     wl.region.as_str()
-                ))
-            })?;
+                )));
+            }
+        };
 
         let now = Utc::now();
         let mut inst = Instance {
@@ -199,10 +431,22 @@ impl ComputeService {
         // NAT allocation (CloudRat shared model)
         match self.net.allocate_nat(wl.region, inst.id).await {
             Ok(nat) => {
-                inst.nat_public_ip = Some(nat.public_ip);
+                inst.nat_public_ip = Some(nat.public_ip.clone());
                 inst.nat_port_start = Some(nat.port_start);
                 inst.nat_port_end = Some(nat.port_end);
-                inst.ipv6 = nat.ipv6;
+                inst.ipv6 = nat.ipv6.clone();
+                let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::NatAllocated, Some(wl.created_by));
+                ev.workload_id = Some(wl.id);
+                ev.instance_id = Some(inst.id);
+                ev.node_id = Some(node.id);
+                ev.region = Some(wl.region.as_str().into());
+                ev.metadata = serde_json::json!({
+                    "public_ip": nat.public_ip,
+                    "port_start": nat.port_start,
+                    "port_end": nat.port_end,
+                    "ipv6": nat.ipv6,
+                });
+                self.emit(ev).await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "NAT allocate failed — continuing without public map");
@@ -210,18 +454,62 @@ impl ComputeService {
         }
 
         self.store.insert_instance(&inst).await?;
+        {
+            let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::InstanceScheduled, Some(wl.created_by));
+            ev.workload_id = Some(wl.id);
+            ev.instance_id = Some(inst.id);
+            ev.node_id = Some(node.id);
+            ev.region = Some(wl.region.as_str().into());
+            ev.metadata = serde_json::json!({ "driver": inst.driver.as_str() });
+            self.emit(ev).await;
+        }
 
         if let Some(ref endpoint) = node.agent_endpoint {
+            let id_hex = inst.id.to_string().replace('-', "");
+            let tap = format!("tt{}", &id_hex[..id_hex.len().min(8)]);
+            let image_slug = wl.image_template_id.map(|_| "alpine".to_string());
             let cmd = NodeCommand {
                 instance_id: inst.id.to_string(),
                 driver: inst.driver,
                 action: NodeAction::Boot,
                 resources: wl.resources.clone(),
-                image_slug: None,
+                image_slug,
+                tap_device: Some(tap),
+                nat_public_ip: inst.nat_public_ip.clone(),
+                nat_port_start: inst.nat_port_start,
+                nat_port_end: inst.nat_port_end,
+                git_clone_url: self.resolve_clone_url(wl.repository_id).await,
+                git_sha: wl.git_sha.clone(),
+                deploy_token: {
+                    let need = match wl.repository_id {
+                        Some(rid) => self.store.repo_is_private(rid).await.unwrap_or(true),
+                        None => false,
+                    };
+                    if need {
+                        self.mint_deploy_token(wl.org_id, wl.repository_id, wl.created_by)
+                            .await
+                    } else {
+                        None
+                    }
+                },
             };
             if let Err(e) = self.provider.dispatch(endpoint, cmd).await {
-                // Lab-friendly: record instance running intent even if agent is down.
                 tracing::warn!(error = %e, "tt-node dispatch failed; instance recorded as running");
+                let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::ProviderDispatchFailed, Some(wl.created_by));
+                ev.workload_id = Some(wl.id);
+                ev.instance_id = Some(inst.id);
+                ev.node_id = Some(node.id);
+                ev.region = Some(wl.region.as_str().into());
+                ev.metadata = serde_json::json!({ "error": e.to_string() });
+                self.emit(ev).await;
+            } else {
+                let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::InstanceBooted, Some(wl.created_by));
+                ev.workload_id = Some(wl.id);
+                ev.instance_id = Some(inst.id);
+                ev.node_id = Some(node.id);
+                ev.region = Some(wl.region.as_str().into());
+                ev.metadata = serde_json::json!({ "driver": inst.driver.as_str() });
+                self.emit(ev).await;
             }
         }
 
@@ -232,6 +520,26 @@ impl ComputeService {
             .update_workload_status(workload_id, WorkloadStatus::Running)
             .await?;
 
+        {
+            let ev = LifecycleEvent {
+                id: uuid::Uuid::now_v7(),
+                ts: Utc::now(),
+                org_id: Some(wl.org_id),
+                principal_id: Some(wl.created_by),
+                kind: LifecycleKind::WorkloadStarted,
+                workload_id: Some(wl.id),
+                instance_id: Some(inst.id),
+                node_id: Some(node.id),
+                region: Some(wl.region.as_str().into()),
+                metadata: serde_json::json!({
+                    "driver": inst.driver.as_str(),
+                    "nat_public_ip": inst.nat_public_ip,
+                    "nat_port_start": inst.nat_port_start,
+                    "nat_port_end": inst.nat_port_end,
+                }),
+            };
+            self.emit(ev).await;
+        }
         info!(
             instance = %inst.id,
             node = %node.id,
@@ -242,6 +550,7 @@ impl ComputeService {
     }
 
     pub async fn stop(&self, workload_id: WorkloadId) -> Result<()> {
+        let wl = self.get_workload(workload_id).await?;
         let instances = self.store.list_instances_for_workload(workload_id).await?;
         for mut inst in instances {
             if let Ok(Some(node)) = self.store.get_node(inst.node_id).await {
@@ -256,6 +565,13 @@ impl ComputeService {
                             disk_gb: 1,
                         },
                         image_slug: None,
+                        tap_device: None,
+                        nat_public_ip: None,
+                        nat_port_start: None,
+                        nat_port_end: None,
+                        git_clone_url: None,
+                        git_sha: None,
+                        deploy_token: None,
                     };
                     let _ = self.provider.dispatch(ep, cmd).await;
                 }
@@ -264,10 +580,33 @@ impl ComputeService {
             inst.updated_at = Utc::now();
             self.store.update_instance(&inst).await?;
             let _ = self.net.release(inst.id).await;
+            {
+                let mut ev = Self::lc(Some(wl.org_id), LifecycleKind::NatReleased, Some(wl.created_by));
+                ev.workload_id = Some(wl.id);
+                ev.instance_id = Some(inst.id);
+                ev.node_id = Some(inst.node_id);
+                ev.metadata = serde_json::json!({});
+                self.emit(ev).await;
+            }
         }
         self.store
             .update_workload_status(workload_id, WorkloadStatus::Stopped)
             .await?;
+        {
+            let ev = LifecycleEvent {
+                id: uuid::Uuid::now_v7(),
+                ts: Utc::now(),
+                org_id: Some(wl.org_id),
+                principal_id: Some(wl.created_by),
+                kind: LifecycleKind::WorkloadStopped,
+                workload_id: Some(wl.id),
+                instance_id: None,
+                node_id: None,
+                region: Some(wl.region.as_str().into()),
+                metadata: serde_json::json!({}),
+            };
+            self.emit(ev).await;
+        }
         Ok(())
     }
 
@@ -293,5 +632,95 @@ impl ComputeService {
             .get_instance(id)
             .await?
             .ok_or(ComputeError::NotFound)
+    }
+
+
+    pub async fn get_quota_usage(&self, org_id: OrgId) -> Result<QuotaUsage> {
+        let (max_workloads, max_vcpu_total, max_concurrent_running) =
+            self.store.get_quota(org_id).await?;
+        let workloads_used = self.store.count_org_workloads(org_id).await?;
+        let vcpu_used = self.store.sum_org_vcpu(org_id).await?;
+        let running_used = self.store.count_org_running(org_id).await?;
+        Ok(QuotaUsage {
+            max_workloads,
+            max_vcpu_total,
+            max_concurrent_running,
+            workloads_used,
+            vcpu_used,
+            running_used,
+        })
+    }
+
+    pub async fn set_quota(
+        &self,
+        org_id: OrgId,
+        max_workloads: u32,
+        max_vcpu_total: u32,
+        max_concurrent_running: u32,
+    ) -> Result<QuotaUsage> {
+        if max_workloads == 0 || max_vcpu_total == 0 || max_concurrent_running == 0 {
+            return Err(ComputeError::InvalidArgument(
+                "quota fields must be >= 1".into(),
+            ));
+        }
+        self.store
+            .set_quota(org_id, max_workloads, max_vcpu_total, max_concurrent_running)
+            .await?;
+        self.get_quota_usage(org_id).await
+    }
+
+    /// Create workload bound to a repo ref and start it (deploy).
+    pub async fn deploy_from_git(
+        &self,
+        org_id: OrgId,
+        created_by: PrincipalId,
+        name: String,
+        shape: WorkloadShape,
+        region: RegionCode,
+        resources: ResourceSpec,
+        repository_id: RepositoryId,
+        git_ref: String,
+        git_sha: Option<String>,
+        image_template_id: Option<ImageTemplateId>,
+    ) -> Result<(Workload, Instance)> {
+        {
+            let ev = LifecycleEvent {
+                id: uuid::Uuid::now_v7(),
+                ts: Utc::now(),
+                org_id: Some(org_id),
+                principal_id: Some(created_by),
+                kind: LifecycleKind::DeployRequested,
+                workload_id: None,
+                instance_id: None,
+                node_id: None,
+                region: Some(region.as_str().into()),
+                metadata: serde_json::json!({
+                    "repository_id": repository_id.to_string(),
+                    "git_ref": git_ref,
+                    "name": name,
+                }),
+            };
+            self.emit(ev).await;
+        }
+        let mut wl = self
+            .create_workload(
+                org_id,
+                created_by,
+                name,
+                shape,
+                resources,
+                region,
+                image_template_id,
+                Some(repository_id),
+                Some(git_ref),
+            )
+            .await?;
+        // persist sha if provided
+        if git_sha.is_some() {
+            wl.git_sha = git_sha;
+            // best-effort: status path doesn't update sha — store via start using wl
+        }
+        let inst = self.start(wl.id).await?;
+        Ok((wl, inst))
     }
 }

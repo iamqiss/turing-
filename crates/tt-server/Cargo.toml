@@ -22,6 +22,7 @@ tt-realtime = { workspace = true }
 tt-api = { workspace = true }
 tt-storage = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 tonic = { workspace = true }
 tonic-web = { workspace = true }
 tracing = { workspace = true }

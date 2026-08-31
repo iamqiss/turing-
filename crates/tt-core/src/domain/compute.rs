@@ -282,3 +282,83 @@ pub struct ImageTemplate {
     pub disk_mb: u32,
     pub active: bool,
 }
+
+
+/// Compute / deploy lifecycle events (agent-visible, dual-written to ClickHouse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleKind {
+    WorkloadCreated,
+    WorkloadStarted,
+    WorkloadStopped,
+    WorkloadDestroyed,
+    InstanceBooted,
+    InstanceFailed,
+    InstanceScheduled,
+    NodeRegistered,
+    NodeReady,
+    NodeOffline,
+    DeployRequested,
+    NatAllocated,
+    NatReleased,
+    QuotaExceeded,
+    ProviderDispatchFailed,
+}
+
+impl LifecycleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkloadCreated => "workload_created",
+            Self::WorkloadStarted => "workload_started",
+            Self::WorkloadStopped => "workload_stopped",
+            Self::WorkloadDestroyed => "workload_destroyed",
+            Self::InstanceBooted => "instance_booted",
+            Self::InstanceFailed => "instance_failed",
+            Self::InstanceScheduled => "instance_scheduled",
+            Self::NodeRegistered => "node_registered",
+            Self::NodeReady => "node_ready",
+            Self::NodeOffline => "node_offline",
+            Self::DeployRequested => "deploy_requested",
+            Self::NatAllocated => "nat_allocated",
+            Self::NatReleased => "nat_released",
+            Self::QuotaExceeded => "quota_exceeded",
+            Self::ProviderDispatchFailed => "provider_dispatch_failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "workload_created" => Some(Self::WorkloadCreated),
+            "workload_started" => Some(Self::WorkloadStarted),
+            "workload_stopped" => Some(Self::WorkloadStopped),
+            "workload_destroyed" => Some(Self::WorkloadDestroyed),
+            "instance_booted" => Some(Self::InstanceBooted),
+            "instance_failed" => Some(Self::InstanceFailed),
+            "instance_scheduled" => Some(Self::InstanceScheduled),
+            "node_registered" => Some(Self::NodeRegistered),
+            "node_ready" => Some(Self::NodeReady),
+            "node_offline" => Some(Self::NodeOffline),
+            "deploy_requested" => Some(Self::DeployRequested),
+            "nat_allocated" => Some(Self::NatAllocated),
+            "nat_released" => Some(Self::NatReleased),
+            "quota_exceeded" => Some(Self::QuotaExceeded),
+            "provider_dispatch_failed" => Some(Self::ProviderDispatchFailed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    pub id: uuid::Uuid,
+    pub ts: DateTime<Utc>,
+    /// None for platform-level events (node register/ready).
+    pub org_id: Option<OrgId>,
+    pub principal_id: Option<PrincipalId>,
+    pub kind: LifecycleKind,
+    pub workload_id: Option<WorkloadId>,
+    pub instance_id: Option<InstanceId>,
+    pub node_id: Option<NodeId>,
+    pub region: Option<String>,
+    pub metadata: serde_json::Value,
+}

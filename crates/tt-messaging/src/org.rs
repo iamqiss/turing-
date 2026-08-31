@@ -424,6 +424,14 @@ impl OrgService {
         })
     }
 
+    pub async fn require_member(&self, org_id: OrgId, principal_id: PrincipalId) -> Result<()> {
+        self.store
+            .get_member(org_id, principal_id)
+            .await?
+            .ok_or(MessagingError::Forbidden("not an org member".into()))?;
+        Ok(())
+    }
+
     pub async fn require_admin(&self, org_id: OrgId, principal_id: PrincipalId) -> Result<()> {
         let m = self
             .store
@@ -432,6 +440,23 @@ impl OrgService {
             .ok_or(MessagingError::Forbidden("not an org member".into()))?;
         if !m.role.is_adminish() {
             return Err(MessagingError::Forbidden("org admin required".into()));
+        }
+        Ok(())
+    }
+
+    /// Active seat only — suspended members cannot mutate compute.
+    pub async fn require_active_member(
+        &self,
+        org_id: OrgId,
+        principal_id: PrincipalId,
+    ) -> Result<()> {
+        let m = self
+            .store
+            .get_member(org_id, principal_id)
+            .await?
+            .ok_or(MessagingError::Forbidden("not an org member".into()))?;
+        if matches!(m.seat_status, tt_core::domain::SeatStatus::Suspended) {
+            return Err(MessagingError::Forbidden("seat suspended".into()));
         }
         Ok(())
     }

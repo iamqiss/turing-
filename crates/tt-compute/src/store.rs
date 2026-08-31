@@ -13,6 +13,13 @@ pub trait ComputeStore: Send + Sync {
     async fn get_node(&self, id: NodeId) -> Result<Option<ComputeNode>>;
     async fn list_nodes(&self, region: Option<RegionCode>) -> Result<Vec<ComputeNode>>;
     async fn heartbeat(&self, id: NodeId, endpoint: &str) -> Result<()>;
+    async fn set_node_status(&self, id: NodeId, status: NodeStatus) -> Result<()>;
+    async fn set_node_agent_token(&self, id: NodeId, token_hash: &str, prefix: &str) -> Result<()>;
+    async fn verify_node_agent_token(&self, id: NodeId, token: &str) -> Result<bool>;
+    async fn list_stuck_scheduled(
+        &self,
+        older_than: chrono::TimeDelta,
+    ) -> Result<Vec<Workload>>;
 
     async fn insert_workload(&self, w: &Workload) -> Result<()>;
     async fn get_workload(&self, id: WorkloadId) -> Result<Option<Workload>>;
@@ -25,7 +32,36 @@ pub trait ComputeStore: Send + Sync {
     async fn update_instance(&self, i: &Instance) -> Result<()>;
 
     async fn count_org_workloads(&self, org_id: OrgId) -> Result<u32>;
+    /// Workloads currently running or scheduled (counts toward concurrent cap).
+    async fn count_org_running(&self, org_id: OrgId) -> Result<u32>;
+    /// Sum of vcpu across non-destroyed workloads.
+    async fn sum_org_vcpu(&self, org_id: OrgId) -> Result<u32>;
     async fn get_quota(&self, org_id: OrgId) -> Result<(u32, u32, u32)>; // max_wl, max_vcpu, max_running
+    async fn set_quota(
+        &self,
+        org_id: OrgId,
+        max_workloads: u32,
+        max_vcpu_total: u32,
+        max_concurrent_running: u32,
+    ) -> Result<()>;
+    /// Ensure a quota row exists (defaults).
+    async fn ensure_quota(&self, org_id: OrgId) -> Result<()>;
+    /// workspace_id + repo name for Smart HTTP clone URL
+    async fn repo_clone_coords(
+        &self,
+        repository_id: RepositoryId,
+    ) -> Result<Option<(WorkspaceId, String)>>;
+    async fn repo_is_private(&self, repository_id: RepositoryId) -> Result<bool>;
+    async fn insert_deploy_token(
+        &self,
+        id: uuid::Uuid,
+        org_id: OrgId,
+        repository_id: Option<RepositoryId>,
+        principal_id: PrincipalId,
+        token_hash: &str,
+        token_prefix: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()>;
 }
 
 pub struct PostgresComputeStore {
@@ -232,6 +268,64 @@ impl ComputeStore for PostgresComputeStore {
         Ok(())
     }
 
+    async fn set_node_status(&self, id: NodeId, status: NodeStatus) -> Result<()> {
+        sqlx::query("UPDATE compute_nodes SET status = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(status.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
+    }
+
+    async fn set_node_agent_token(&self, id: NodeId, token_hash: &str, prefix: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE compute_nodes SET agent_token_hash = $2, agent_token_prefix = $3 WHERE id = $1",
+        )
+        .bind(id.as_uuid())
+        .bind(token_hash)
+        .bind(prefix)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
+    }
+
+    async fn verify_node_agent_token(&self, id: NodeId, token: &str) -> Result<bool> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT agent_token_hash FROM compute_nodes WHERE id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        let Some((Some(hash),)) = row else {
+            // No token set yet — allow first heartbeat (bootstrap), then lock
+            return Ok(true);
+        };
+        Ok(crate::security::verify_agent_token(token, &hash))
+    }
+
+    async fn list_stuck_scheduled(
+        &self,
+        older_than: chrono::TimeDelta,
+    ) -> Result<Vec<Workload>> {
+        let cutoff = chrono::Utc::now() - older_than;
+        let rows = sqlx::query_as::<_, WlRow>(
+            r#"
+            SELECT * FROM workloads
+            WHERE status = 'scheduled' AND updated_at < $1
+            ORDER BY updated_at ASC
+            LIMIT 100
+            "#,
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn insert_workload(&self, w: &Workload) -> Result<()> {
         sqlx::query(
             r#"
@@ -380,7 +474,36 @@ impl ComputeStore for PostgresComputeStore {
         Ok(n.max(0) as u32)
     }
 
+    async fn count_org_running(&self, org_id: OrgId) -> Result<u32> {
+        let (n,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM workloads
+            WHERE org_id = $1 AND status IN ('running', 'scheduled')
+            "#,
+        )
+        .bind(org_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(n.max(0) as u32)
+    }
+
+    async fn sum_org_vcpu(&self, org_id: OrgId) -> Result<u32> {
+        let (n,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COALESCE(SUM(vcpu), 0)::bigint FROM workloads
+            WHERE org_id = $1 AND status <> 'destroyed'
+            "#,
+        )
+        .bind(org_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(n.max(0) as u32)
+    }
+
     async fn get_quota(&self, org_id: OrgId) -> Result<(u32, u32, u32)> {
+        self.ensure_quota(org_id).await?;
         let row: Option<(i32, i32, i32)> = sqlx::query_as(
             "SELECT max_workloads, max_vcpu_total, max_concurrent_running FROM org_compute_quotas WHERE org_id = $1",
         )
@@ -390,7 +513,106 @@ impl ComputeStore for PostgresComputeStore {
         .map_err(|e| ComputeError::Other(e.into()))?;
         Ok(match row {
             Some((a, b, c)) => (a.max(0) as u32, b.max(0) as u32, c.max(0) as u32),
-            None => (5, 8, 5), // defaults
+            None => (5, 8, 5),
         })
+    }
+
+    async fn set_quota(
+        &self,
+        org_id: OrgId,
+        max_workloads: u32,
+        max_vcpu_total: u32,
+        max_concurrent_running: u32,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO org_compute_quotas (
+                org_id, max_workloads, max_vcpu_total, max_concurrent_running, updated_at
+            ) VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (org_id) DO UPDATE SET
+                max_workloads = EXCLUDED.max_workloads,
+                max_vcpu_total = EXCLUDED.max_vcpu_total,
+                max_concurrent_running = EXCLUDED.max_concurrent_running,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(org_id.as_uuid())
+        .bind(max_workloads as i32)
+        .bind(max_vcpu_total as i32)
+        .bind(max_concurrent_running as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
+    }
+
+    async fn ensure_quota(&self, org_id: OrgId) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO org_compute_quotas (org_id, max_workloads, max_vcpu_total, max_concurrent_running, updated_at)
+            VALUES ($1, 5, 8, 5, NOW())
+            ON CONFLICT (org_id) DO NOTHING
+            "#,
+        )
+        .bind(org_id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
+    }
+
+    async fn repo_clone_coords(
+        &self,
+        repository_id: RepositoryId,
+    ) -> Result<Option<(WorkspaceId, String)>> {
+        let row: Option<(uuid::Uuid, String)> = sqlx::query_as(
+            "SELECT workspace_id, name FROM repositories WHERE id = $1",
+        )
+        .bind(repository_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(row.map(|(ws, name)| (WorkspaceId::from_uuid(ws), name)))
+    }
+
+    async fn repo_is_private(&self, repository_id: RepositoryId) -> Result<bool> {
+        let row: Option<(bool,)> = sqlx::query_as(
+            "SELECT is_private FROM repositories WHERE id = $1",
+        )
+        .bind(repository_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(row.map(|r| r.0).unwrap_or(true))
+    }
+
+    async fn insert_deploy_token(
+        &self,
+        id: uuid::Uuid,
+        org_id: OrgId,
+        repository_id: Option<RepositoryId>,
+        principal_id: PrincipalId,
+        token_hash: &str,
+        token_prefix: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO deploy_tokens (
+                id, org_id, repository_id, principal_id, token_hash, token_prefix, expires_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+            "#,
+        )
+        .bind(id)
+        .bind(org_id.as_uuid())
+        .bind(repository_id.as_ref().map(|r| *r.as_uuid()))
+        .bind(principal_id.as_uuid())
+        .bind(token_hash)
+        .bind(token_prefix)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
     }
 }

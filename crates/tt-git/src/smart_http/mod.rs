@@ -36,6 +36,7 @@ pub struct GitHttpState {
     pub repos: Arc<RepoService>,
     pub resolver: Arc<PrincipalResolver>,
     pub push_tx: Option<tokio::sync::mpsc::UnboundedSender<PushAnalysis>>,
+    pub deploy_pool: Option<sqlx::PgPool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -93,6 +94,21 @@ async fn resolve_repo_path(
 }
 
 
+
+fn extract_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    if let Some(t) = extract_bearer(raw) {
+        return Some(t.to_string());
+    }
+    // Basic base64(user:password) — git x-access-token:DEPLOY_TOKEN
+    let b = raw.strip_prefix("Basic ")?;
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(b).ok()?;
+    let s = String::from_utf8(decoded).ok()?;
+    let (_user, pass) = s.split_once(':')?;
+    Some(pass.to_string())
+}
+
 async fn authorize_principal(
     state: &GitHttpState,
     headers: &HeaderMap,
@@ -102,19 +118,23 @@ async fn authorize_principal(
     if !is_private && !write {
         return Ok(PrincipalId::from_uuid(Uuid::nil()));
     }
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer);
-    let Some(token) = auth else {
+    let Some(token) = extract_token(headers) else {
         return Err((
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
+            [(header::WWW_AUTHENTICATE, "Bearer, Basic")],
             "authentication required",
         )
             .into_response());
     };
-    let ctx = state.resolver.resolve_bearer(token).await.map_err(|e| {
+    // Deploy tokens: tt_deploy_{prefix}_{secret} (read-only clone)
+    if token.starts_with("tt_deploy_") && !write {
+        if let Some(pool) = &state.deploy_pool {
+            if let Some(pid) = validate_deploy_token(pool, &token).await {
+                return Ok(pid);
+            }
+        }
+    }
+    let ctx = state.resolver.resolve_bearer(&token).await.map_err(|e| {
         (
             StatusCode::UNAUTHORIZED,
             format!("unauthorized: {e}"),
@@ -122,6 +142,27 @@ async fn authorize_principal(
             .into_response()
     })?;
     Ok(ctx.principal_id())
+}
+
+async fn validate_deploy_token(pool: &sqlx::PgPool, token: &str) -> Option<PrincipalId> {
+    // tt_deploy_{8charprefix}_{secret}
+    let rest = token.strip_prefix("tt_deploy_")?;
+    let (prefix, secret) = rest.split_once('_')?;
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(secret.as_bytes()));
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT principal_id FROM deploy_tokens
+        WHERE token_prefix = $1 AND token_hash = $2
+          AND revoked_at IS NULL AND expires_at > NOW()
+        "#,
+    )
+    .bind(prefix)
+    .bind(hash)
+    .fetch_optional(pool)
+    .await
+    .ok()?;
+    row.map(|(id,)| PrincipalId::from_uuid(id))
 }
 
 async fn authorize(
@@ -134,21 +175,24 @@ async fn authorize(
         // Public read
         return Ok(());
     }
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer);
-    let Some(token) = auth else {
+    let Some(token) = extract_token(headers) else {
         return Err((
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
+            [(header::WWW_AUTHENTICATE, "Bearer, Basic")],
             "authentication required",
         )
             .into_response());
     };
+    if token.starts_with("tt_deploy_") && !write {
+        if let Some(pool) = &state.deploy_pool {
+            if validate_deploy_token(pool, &token).await.is_some() {
+                return Ok(());
+            }
+        }
+    }
     state
         .resolver
-        .resolve_bearer(token)
+        .resolve_bearer(&token)
         .await
         .map_err(|e| {
             (
@@ -157,7 +201,6 @@ async fn authorize(
             )
                 .into_response()
         })?;
-    // Workspace-level ACL can be tightened later
     Ok(())
 }
 

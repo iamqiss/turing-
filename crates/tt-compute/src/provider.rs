@@ -26,6 +26,9 @@ pub struct NodeCommand {
     pub git_clone_url: Option<String>,
     pub git_sha: Option<String>,
     pub deploy_token: Option<String>,
+    /// In-memory only — used to HMAC-sign the request to tt-node
+    #[serde(skip)]
+    pub agent_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,10 +109,19 @@ impl HypervisorProvider for HttpProvider {
             "git_sha": cmd.git_sha,
             "deploy_token": cmd.deploy_token,
         });
-        let res = self
-            .client
-            .post(&url)
-            .json(&body)
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| ProviderError::Message(e.to_string()))?;
+        let mut req = self.client.post(&url).header("content-type", "application/json");
+        if let Some(ref tok) = cmd.agent_token {
+            let ts = chrono::Utc::now().timestamp();
+            let sig = crate::crypto::sign_request(tok, ts, &body_bytes);
+            req = req
+                .header("x-tt-timestamp", ts.to_string())
+                .header("x-tt-signature", sig)
+                .header("x-tt-node-auth", "hmac-sha256");
+        }
+        let res = req
+            .body(body_bytes)
             .send()
             .await
             .map_err(|e| ProviderError::Message(format!("tt-node unreachable: {e}")))?;

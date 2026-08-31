@@ -19,6 +19,8 @@ use crate::service::MessagingService;
 pub struct MessagingHttpState {
     pub messaging: Arc<MessagingService>,
     pub resolver: Arc<PrincipalResolver>,
+    /// Optional Meilisearch indexer (set by tt-server)
+    pub search: Option<Arc<tt_search::SearchService>>,
 }
 
 pub fn router(state: MessagingHttpState) -> Router {
@@ -290,7 +292,22 @@ async fn send_message(
         .send_message(id, ctx.principal_id(), body.content, thread_id, reply_to_id)
         .await
     {
-        Ok(msg) => (StatusCode::CREATED, Json(message_json(&msg))).into_response(),
+        Ok(msg) => {
+            if let Some(ref search) = state.search {
+                if let Ok(ch) = state.messaging.get_channel(msg.channel_id).await {
+                    search
+                        .index_message(
+                            msg.id,
+                            msg.channel_id,
+                            ch.workspace_id,
+                            &msg.content,
+                            msg.author_id,
+                        )
+                        .await;
+                }
+            }
+            (StatusCode::CREATED, Json(message_json(&msg))).into_response()
+        },
         Err(e) => map_err(e),
     }
 }

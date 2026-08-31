@@ -15,7 +15,17 @@ pub trait ComputeStore: Send + Sync {
     async fn heartbeat(&self, id: NodeId, endpoint: &str) -> Result<()>;
     async fn set_node_status(&self, id: NodeId, status: NodeStatus) -> Result<()>;
     async fn set_node_agent_token(&self, id: NodeId, token_hash: &str, prefix: &str) -> Result<()>;
+    async fn set_node_agent_secrets(
+        &self,
+        id: NodeId,
+        token_hash: &str,
+        prefix: &str,
+        token_enc: &[u8],
+    ) -> Result<()>;
+    async fn get_node_agent_enc(&self, id: NodeId) -> Result<Option<Vec<u8>>>;
     async fn verify_node_agent_token(&self, id: NodeId, token: &str) -> Result<bool>;
+    async fn is_platform_operator(&self, principal_id: PrincipalId) -> Result<bool>;
+    async fn add_platform_operator(&self, principal_id: PrincipalId, note: Option<&str>) -> Result<()>;
     async fn list_stuck_scheduled(
         &self,
         older_than: chrono::TimeDelta,
@@ -61,6 +71,7 @@ pub trait ComputeStore: Send + Sync {
         token_hash: &str,
         token_prefix: &str,
         expires_at: chrono::DateTime<chrono::Utc>,
+        token_enc: Option<&[u8]>,
     ) -> Result<()>;
 }
 
@@ -285,6 +296,68 @@ impl ComputeStore for PostgresComputeStore {
         .bind(id.as_uuid())
         .bind(token_hash)
         .bind(prefix)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
+    }
+
+    async fn set_node_agent_secrets(
+        &self,
+        id: NodeId,
+        token_hash: &str,
+        prefix: &str,
+        token_enc: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE compute_nodes
+            SET agent_token_hash = $2, agent_token_prefix = $3, agent_token_enc = $4
+            WHERE id = $1
+            "#,
+        )
+        .bind(id.as_uuid())
+        .bind(token_hash)
+        .bind(prefix)
+        .bind(token_enc)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(())
+    }
+
+    async fn get_node_agent_enc(&self, id: NodeId) -> Result<Option<Vec<u8>>> {
+        let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
+            "SELECT agent_token_enc FROM compute_nodes WHERE id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(row.and_then(|r| r.0))
+    }
+
+    async fn is_platform_operator(&self, principal_id: PrincipalId) -> Result<bool> {
+        let (n,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM platform_operators WHERE principal_id = $1",
+        )
+        .bind(principal_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ComputeError::Other(e.into()))?;
+        Ok(n > 0)
+    }
+
+    async fn add_platform_operator(&self, principal_id: PrincipalId, note: Option<&str>) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO platform_operators (principal_id, note, created_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (principal_id) DO NOTHING
+            "#,
+        )
+        .bind(principal_id.as_uuid())
+        .bind(note)
         .execute(&self.pool)
         .await
         .map_err(|e| ComputeError::Other(e.into()))?;
@@ -595,12 +668,13 @@ impl ComputeStore for PostgresComputeStore {
         token_hash: &str,
         token_prefix: &str,
         expires_at: chrono::DateTime<chrono::Utc>,
+        token_enc: Option<&[u8]>,
     ) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO deploy_tokens (
-                id, org_id, repository_id, principal_id, token_hash, token_prefix, expires_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                id, org_id, repository_id, principal_id, token_hash, token_prefix, expires_at, token_enc
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             "#,
         )
         .bind(id)
@@ -610,6 +684,7 @@ impl ComputeStore for PostgresComputeStore {
         .bind(token_hash)
         .bind(token_prefix)
         .bind(expires_at)
+        .bind(token_enc)
         .execute(&self.pool)
         .await
         .map_err(|e| ComputeError::Other(e.into()))?;

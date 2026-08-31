@@ -28,6 +28,9 @@ pub struct ComputeService {
     /// e.g. http://control.example:8080 — used to build Smart HTTP clone URLs
     public_base_url: String,
     lifecycle: Option<Arc<dyn LifecycleEmitter>>,
+    secret_box: crate::crypto::SecretBox,
+    /// Extra operator principal ids from config (TT_PLATFORM_OPERATOR_IDS)
+    platform_operator_ids: Vec<String>,
 }
 
 /// Thin adapter so tt-compute does not depend on tt-storage.
@@ -42,6 +45,8 @@ impl ComputeService {
         net: Arc<dyn IpAllocator>,
         provider: Arc<dyn HypervisorProvider>,
         public_base_url: String,
+        secrets_key: [u8; 32],
+        platform_operator_ids: Vec<String>,
     ) -> Self {
         Self {
             store,
@@ -49,7 +54,34 @@ impl ComputeService {
             provider,
             public_base_url: public_base_url.trim_end_matches('/').to_string(),
             lifecycle: None,
+            secret_box: crate::crypto::SecretBox::new(secrets_key),
+            platform_operator_ids,
         }
+    }
+
+    pub async fn require_platform_operator(&self, principal_id: PrincipalId) -> Result<()> {
+        let id = principal_id.to_string();
+        if self.platform_operator_ids.iter().any(|x| x == &id) {
+            return Ok(());
+        }
+        if self.store.is_platform_operator(principal_id).await? {
+            return Ok(());
+        }
+        Err(ComputeError::Forbidden(
+            "platform operator required to manage compute nodes".into(),
+        ))
+    }
+
+    pub async fn add_platform_operator(
+        &self,
+        actor: PrincipalId,
+        target: PrincipalId,
+        note: Option<String>,
+    ) -> Result<()> {
+        self.require_platform_operator(actor).await?;
+        self.store
+            .add_platform_operator(target, note.as_deref())
+            .await
     }
 
     pub fn with_lifecycle(mut self, emitter: Arc<dyn LifecycleEmitter>) -> Self {
@@ -61,6 +93,11 @@ impl ComputeService {
         if let Some(ref lc) = self.lifecycle {
             lc.emit(ev).await;
         }
+    }
+
+    async fn decrypt_node_agent(&self, node_id: NodeId) -> Option<String> {
+        let enc = self.store.get_node_agent_enc(node_id).await.ok()??;
+        self.secret_box.decrypt_str(&enc).ok()
     }
 
     fn lc(
@@ -105,6 +142,8 @@ impl ComputeService {
         let hash = format!("{:x}", Sha256::digest(secret.as_bytes()));
         let id = uuid::Uuid::now_v7();
         let exp = Utc::now() + chrono::Duration::hours(2);
+        let plaintext = format!("tt_deploy_{prefix}_{secret}");
+        let enc = self.secret_box.encrypt_str(&plaintext).ok();
         if self
             .store
             .insert_deploy_token(
@@ -115,18 +154,19 @@ impl ComputeService {
                 &hash,
                 &prefix,
                 exp,
+                enc.as_deref(),
             )
             .await
             .is_err()
         {
             return None;
         }
-        // Wire format: tt_deploy_{prefix}_{secret}
-        Some(format!("tt_deploy_{prefix}_{secret}"))
+        Some(plaintext)
     }
 
     pub async fn register_node(
         &self,
+        actor: PrincipalId,
         name: String,
         region: RegionCode,
         physical_cores: u32,
@@ -135,6 +175,7 @@ impl ComputeService {
         reserved_memory_mb: u32,
         overcommit_ratio: f32,
     ) -> Result<(ComputeNode, String)> {
+        self.require_platform_operator(actor).await?;
         if physical_cores == 0 || memory_mb == 0 {
             return Err(ComputeError::InvalidArgument(
                 "physical_cores and memory_mb required".into(),
@@ -165,8 +206,12 @@ impl ComputeService {
         };
         self.store.insert_node(&node).await?;
         let (plaintext, hash, prefix) = security::mint_agent_token();
+        let enc = self
+            .secret_box
+            .encrypt_str(&plaintext)
+            .map_err(|e| ComputeError::Other(anyhow::anyhow!(e.to_string())))?;
         self.store
-            .set_node_agent_token(node.id, &hash, &prefix)
+            .set_node_agent_secrets(node.id, &hash, &prefix, &enc)
             .await?;
         {
             let mut ev = Self::lc(None, LifecycleKind::NodeRegistered, None);
@@ -492,6 +537,7 @@ impl ComputeService {
                         None
                     }
                 },
+                agent_token: self.decrypt_node_agent(node.id).await,
             };
             if let Err(e) = self.provider.dispatch(endpoint, cmd).await {
                 tracing::warn!(error = %e, "tt-node dispatch failed; instance recorded as running");
@@ -572,6 +618,7 @@ impl ComputeService {
                         git_clone_url: None,
                         git_sha: None,
                         deploy_token: None,
+                        agent_token: self.decrypt_node_agent(node.id).await,
                     };
                     let _ = self.provider.dispatch(ep, cmd).await;
                 }

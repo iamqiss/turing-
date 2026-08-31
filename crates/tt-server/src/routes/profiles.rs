@@ -147,7 +147,16 @@ async fn update_profile(
         )
         .await
     {
-        Ok(p) => Json(p).into_response(),
+        Ok(p) => {
+            // Refresh person document in Meilisearch
+            if let Ok(Some(prin)) = state.auth_store.get_principal(pid).await {
+                state
+                    .search
+                    .index_person(pid, &prin.handle, &prin.display_name, p.bio.as_deref())
+                    .await;
+            }
+            Json(p).into_response()
+        }
         Err(e) => map_err(e),
     }
 }
@@ -188,7 +197,15 @@ async fn me_update(
         )
         .await
     {
-        Ok(p) => Json(p).into_response(),
+        Ok(p) => {
+            if let Ok(Some(prin)) = state.auth_store.get_principal(ctx.principal_id()).await {
+                state
+                    .search
+                    .index_person(ctx.principal_id(), &prin.handle, &prin.display_name, p.bio.as_deref())
+                    .await;
+            }
+            Json(p).into_response()
+        },
         Err(e) => map_err(e),
     }
 }

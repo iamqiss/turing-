@@ -112,6 +112,7 @@ async fn create_repo(
                     }
                 }
             }
+            state.search.index_repo(&repo, repo.description.as_deref()).await;
             (StatusCode::CREATED, Json(to_response(&repo))).into_response()
         }
         Err(tt_git::GitError::AlreadyExists) => StatusCode::CONFLICT.into_response(),

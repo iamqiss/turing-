@@ -3,6 +3,7 @@
 //! Drivers: Firecracker (C1b), Cloud Hypervisor (stub), Kata (stub).
 
 mod drivers;
+mod auth;
 mod deploy;
 mod netfilter;
 mod guest_net;
@@ -152,8 +153,22 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Health> {
 
 async fn command(
     State(st): State<Arc<AppState>>,
-    Json(req): Json<DriverRequest>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    if let Err(code) = auth::verify_headers(&headers, &body) {
+        return code.into_response();
+    }
+    let req: DriverRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "accepted": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
     info!(
         instance = %req.instance_id,
         driver = %req.driver,

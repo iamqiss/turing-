@@ -172,7 +172,12 @@ async fn create(
         )
         .await
     {
-        Ok(pr) => (StatusCode::CREATED, Json(to_json(&pr))).into_response(),
+        Ok(pr) => {
+            if let Ok(repo) = state.repos.get(pr.repository_id).await {
+                state.search.index_pr(&pr, repo.workspace_id).await;
+            }
+            (StatusCode::CREATED, Json(to_json(&pr))).into_response()
+        },
         Err(e) => map_err(e),
     }
 }

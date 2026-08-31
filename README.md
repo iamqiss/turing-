@@ -93,3 +93,7 @@ Proprietary. All rights reserved.
 
 ## Lines of Code Breakdown
 
+
+## Documentation
+
+- **[Architecture & progress](docs/architecture/TURING_TARPIT.md)** — what is built, how it fits, roadmap (Iggy, Rooms, Scarlett Letter, Dioxus).

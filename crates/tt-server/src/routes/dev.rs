@@ -190,6 +190,16 @@ async fn bootstrap(
         .attach_workspace(org.id, workspace.id, principal.id)
         .await;
 
+    state
+        .search
+        .index_person(
+            principal.id,
+            &principal.handle,
+            &principal.display_name,
+            None,
+        )
+        .await;
+
     (
         StatusCode::CREATED,
         Json(BootstrapResponse {

@@ -22,3 +22,6 @@ clickhouse_database = "turing_tarpit"
 stripe_secret_key = ""
 stripe_webhook_secret = ""
 stripe_price_id = ""
+
+meili_url = "http://localhost:7700"
+meili_master_key = "turing-dev-master-key-change-me"

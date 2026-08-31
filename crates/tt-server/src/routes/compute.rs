@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
             get(list_lifecycle),
         )
         .route("/api/compute/lifecycle-events", get(list_platform_lifecycle))
+        .route("/api/platform/operators", post(add_operator))
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,15 +155,17 @@ async fn register_node(
     headers: HeaderMap,
     Json(body): Json<RegisterNodeBody>,
 ) -> impl IntoResponse {
-    if require_auth(&state, &headers).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
     let Some(region) = RegionCode::parse(&body.region) else {
         return (StatusCode::BAD_REQUEST, "invalid region").into_response();
     };
     match state
         .compute
         .register_node(
+            ctx.principal_id(),
             body.name,
             region,
             body.physical_cores,
@@ -802,5 +805,35 @@ async fn list_platform_lifecycle(
             tracing::error!(error = %e, "list platform lifecycle");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
+pub struct AddOperatorBody {
+    pub principal_id: String,
+    pub note: Option<String>,
+}
+
+async fn add_operator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AddOperatorBody>,
+) -> impl IntoResponse {
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    let target = match body.principal_id.parse() {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid principal_id").into_response(),
+    };
+    match state
+        .compute
+        .add_platform_operator(ctx.principal_id(), target, body.note)
+        .await
+    {
+        Ok(()) => StatusCode::CREATED.into_response(),
+        Err(e) => map_err(e),
     }
 }

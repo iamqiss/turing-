@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Search"
+description = "Turing Tarpit Meilisearch indexing and query"
 
 [dependencies]
 tt-core = { workspace = true }
@@ -18,3 +18,5 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
+sqlx = { workspace = true }

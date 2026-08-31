@@ -47,3 +47,5 @@ hex = "0.4"
 
 tt-compute = { workspace = true }
 tt-net = { workspace = true }
+
+tt-search = { workspace = true }

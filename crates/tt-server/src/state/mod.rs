@@ -12,6 +12,7 @@ use tt_messaging::{MessagingService, OrgService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_storage::{ClickHouseClient, LifecycleStore, ProfileService};
 use tt_compute::ComputeService;
+use tt_search::SearchService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,4 +35,5 @@ pub struct AppState {
     pub clickhouse: Arc<ClickHouseClient>,
     pub lifecycle: Arc<dyn LifecycleStore>,
     pub realtime: Arc<InMemoryRealtime>,
+    pub search: Arc<SearchService>,
 }

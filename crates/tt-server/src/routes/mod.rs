@@ -10,6 +10,7 @@ mod reviews;
 mod orgs;
 mod billing;
 mod compute;
+mod search;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -34,6 +35,7 @@ pub fn router(state: AppState) -> Router {
     let msg_state = MessagingHttpState {
         messaging: state.messaging.clone(),
         resolver: state.principal_resolver.clone(),
+        search: Some(state.search.clone()),
     };
 
     Router::new()
@@ -48,6 +50,7 @@ pub fn router(state: AppState) -> Router {
         .merge(orgs::router())
         .merge(billing::router())
         .merge(compute::router())
+        .merge(search::router())
         .merge(dev::router())
         .with_state(state)
         .merge(messaging_http_router(msg_state))

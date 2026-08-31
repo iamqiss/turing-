@@ -15,6 +15,7 @@ use tt_realtime::InMemoryRealtime;
 use tt_config::Config;
 use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresLifecycleStore, PostgresProfileStore, ProfileService, LifecycleStore};
 use tt_compute::{ComputeService, HttpProvider, Orchestrator, OrchestratorConfig, PostgresComputeStore};
+use tt_search::{MeiliClient, SearchService};
 use tt_net::PostgresIpAllocator;
 
 use crate::state::AppState;
@@ -174,12 +175,17 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let compute_store = Arc::new(PostgresComputeStore::new(db.clone()));
     let ip_alloc = Arc::new(PostgresIpAllocator::new(db.clone()));
     let public_base = config.webauthn_rp_origin.clone();
+    let secrets_key = config
+        .secrets_key_bytes()
+        .unwrap_or_else(|_| [0u8; 32]);
     let compute = Arc::new(
         ComputeService::new(
             compute_store,
             ip_alloc,
             Arc::new(HttpProvider::new()),
             public_base,
+            secrets_key,
+            config.platform_operator_id_list(),
         )
         .with_lifecycle(Arc::new(LcEmit(lifecycle_store.clone()))),
     );
@@ -197,6 +203,28 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let profile_store = Arc::new(PostgresProfileStore::new(db.clone()));
     let profiles = Arc::new(ProfileService::new(profile_store, contrib, db.clone()));
     info!("profiles ready");
+
+    // --- Search (Meilisearch) ---
+    let search = {
+        let client = MeiliClient::new(config.meili_url.clone(), config.meili_master_key.clone());
+        let client = match tokio::time::timeout(std::time::Duration::from_secs(2), client.health()).await {
+            Ok(Ok(())) => {
+                info!("meilisearch reachable");
+                Arc::new(client)
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "meilisearch unavailable – search disabled");
+                Arc::new(MeiliClient::disabled())
+            }
+            Err(_) => {
+                warn!("meilisearch health timed out – search disabled");
+                Arc::new(MeiliClient::disabled())
+            }
+        };
+        let svc = Arc::new(SearchService::new(client));
+        svc.bootstrap_indexes().await;
+        svc
+    };
 
     Ok(AppState {
         config,
@@ -218,6 +246,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         clickhouse: ch,
         lifecycle: lifecycle_store,
         realtime,
+        search,
     })
 }
 

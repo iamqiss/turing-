@@ -171,7 +171,13 @@ async fn create(
             ev.repository_id = Some(repo_id);
             ev.metadata = serde_json::json!({ "number": issue.number, "title": issue.title });
             let _ = state.profiles.events_store().record(&ev).await;
-            (StatusCode::CREATED, Json(to_json(&issue))).into_response()
+            {
+                // Resolve workspace for tenant filter
+                if let Ok(repo) = state.repos.get(issue.repository_id).await {
+                    state.search.index_issue(&issue, repo.workspace_id).await;
+                }
+                (StatusCode::CREATED, Json(to_json(&issue))).into_response()
+            }
         }
         Err(e) => map_err(e),
     }

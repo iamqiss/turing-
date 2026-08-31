@@ -57,6 +57,13 @@ pub struct Config {
     pub stripe_webhook_secret: String,
     /// Price id that maps to seat quantity
     pub stripe_price_id: String,
+
+    /// Comma-separated principal UUIDs allowed to register compute nodes (empty = deny all except DB table)
+    pub platform_operator_ids: String,
+
+    /// 32-byte hex key for encrypting secrets at rest (agent tokens, deploy tokens).
+    /// Falls back to session_key if empty.
+    pub secrets_key: String,
 }
 
 impl Default for Config {
@@ -88,6 +95,8 @@ impl Default for Config {
             stripe_secret_key: String::new(),
             stripe_webhook_secret: String::new(),
             stripe_price_id: String::new(),
+            platform_operator_ids: String::new(),
+            secrets_key: String::new(),
         }
     }
 }
@@ -150,6 +159,8 @@ impl Config {
                         "STRIPE_SECRET_KEY" => "stripe_secret_key".into(),
                         "STRIPE_WEBHOOK_SECRET" => "stripe_webhook_secret".into(),
                         "STRIPE_PRICE_ID" => "stripe_price_id".into(),
+                        "PLATFORM_OPERATOR_IDS" => "platform_operator_ids".into(),
+                        "SECRETS_KEY" => "secrets_key".into(),
                         "REALTIME_BACKEND" => "realtime_backend".into(),
                         other => other.into(),
                     }),
@@ -175,6 +186,36 @@ impl Config {
     }
 
     /// Parse session key from hex. Returns None if empty (dev ephemeral key).
+    pub fn secrets_key_bytes(&self) -> anyhow::Result<[u8; 32]> {
+        let s = if !self.secrets_key.trim().is_empty() {
+            self.secrets_key.trim()
+        } else {
+            self.session_key.trim()
+        };
+        if s.is_empty() {
+            // Dev fallback — deterministic but insecure; set TT_SECRETS_KEY in prod
+            let mut out = [0u8; 32];
+            out[..16].copy_from_slice(b"turing-tarpit-dev");
+            out[16..].copy_from_slice(b"-secrets-key!!!");
+            return Ok(out);
+        }
+        let bytes = hex::decode(s).map_err(|e| anyhow::anyhow!("secrets_key hex: {e}"))?;
+        if bytes.len() != 32 {
+            anyhow::bail!("secrets_key must be 32 bytes hex-encoded");
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+
+    pub fn platform_operator_id_list(&self) -> Vec<String> {
+        self.platform_operator_ids
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     pub fn session_key_bytes(&self) -> anyhow::Result<Option<[u8; 32]>> {
         let s = self.session_key.trim();
         if s.is_empty() {

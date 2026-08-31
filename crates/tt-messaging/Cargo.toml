@@ -24,3 +24,5 @@ sqlx = { workspace = true }
 axum = { workspace = true }
 http = { workspace = true }
 tt-auth = { workspace = true }
+
+tt-search = { workspace = true }

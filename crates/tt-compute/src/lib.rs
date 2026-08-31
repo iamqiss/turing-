@@ -4,6 +4,7 @@ mod error;
 mod store;
 mod service;
 mod security;
+mod crypto;
 mod orchestrator;
 pub mod provider;
 

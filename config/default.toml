@@ -36,3 +36,12 @@ kms_key_id = "scarlet"
 kms_endpoint = "http://127.0.0.1:9797"
 kms_token = ""
 kms_region = "eu-central-1"
+
+# Object storage: local | s3 | rustfs | minio
+object_store = "local"
+# s3_endpoint = "http://127.0.0.1:9000"
+# s3_access_key = "turing"
+# s3_secret_key = "turingsecret"
+# s3_bucket = "turing-tarpit"
+# s3_region = "us-east-1"
+# clamd_addr = "127.0.0.1:3310"

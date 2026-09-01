@@ -17,6 +17,16 @@ const HOST_PORT_RESERVE: u16 = 10_000;
 const PORTS_PER_CUSTOMER: u16 = 5_553;
 const CUSTOMERS_PER_IP: u16 = 10;
 
+/// Customer slot 0..CUSTOMERS_PER_IP → inclusive port range on a shared IPv4.
+pub fn port_block_for_slot(slot: u16) -> Option<(u16, u16)> {
+    if slot >= CUSTOMERS_PER_IP {
+        return None;
+    }
+    let start = HOST_PORT_RESERVE + slot * PORTS_PER_CUSTOMER;
+    let end = start + PORTS_PER_CUSTOMER - 1;
+    Some((start, end))
+}
+
 #[derive(Debug, Clone)]
 pub struct NatAssignment {
     pub public_ip: String,
@@ -163,5 +173,28 @@ impl IpAllocator for PostgresIpAllocator {
             .await
             .map_err(|e| NetError::Other(e.into()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ten_customers_fit_below_65535() {
+        let (start0, _) = port_block_for_slot(0).unwrap();
+        assert_eq!(start0, 10_000);
+        let (_, end_last) = port_block_for_slot(CUSTOMERS_PER_IP - 1).unwrap();
+        assert!(end_last < 65_535);
+        assert_eq!(port_block_for_slot(CUSTOMERS_PER_IP), None);
+    }
+
+    #[test]
+    fn blocks_do_not_overlap() {
+        for s in 0..CUSTOMERS_PER_IP - 1 {
+            let (_, e) = port_block_for_slot(s).unwrap();
+            let (n, _) = port_block_for_slot(s + 1).unwrap();
+            assert!(e < n);
+        }
     }
 }

@@ -37,12 +37,15 @@ pub struct Config {
     pub ceremony_ttl_secs: u64,
     pub agent_token_ttl_days: Option<i64>,
 
-    // Object storage
+    // Object storage — local | s3 | rustfs | minio
+    pub object_store: String,
     pub s3_endpoint: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_bucket: String,
     pub s3_region: String,
+    /// ClamAV clamd address host:port — empty skips virus scan
+    pub clamd_addr: String,
 
     // Git
     pub git_repos_root: String,
@@ -101,11 +104,13 @@ impl Default for Config {
             session_ttl_hours: 168,
             ceremony_ttl_secs: 300,
             agent_token_ttl_days: Some(90),
+            object_store: "local".into(),
             s3_endpoint: "http://localhost:9000".into(),
             s3_access_key: "turing".into(),
             s3_secret_key: "turingsecret".into(),
             s3_bucket: "turing-tarpit".into(),
             s3_region: "us-east-1".into(),
+            clamd_addr: String::new(),
             git_repos_root: "/var/lib/turing-tarpit/repos".into(),
             media_root: "/var/lib/turing-tarpit/media".into(),
             clickhouse_url: "http://localhost:8123".into(),
@@ -174,11 +179,13 @@ impl Config {
                         "WEBAUTHN_RP_NAME" => "webauthn_rp_name".into(),
                         "SESSION_KEY" => "session_key".into(),
                         "SESSION_TTL_HOURS" => "session_ttl_hours".into(),
+                        "OBJECT_STORE" => "object_store".into(),
                         "S3_ENDPOINT" => "s3_endpoint".into(),
                         "S3_ACCESS_KEY" => "s3_access_key".into(),
                         "S3_SECRET_KEY" => "s3_secret_key".into(),
                         "S3_BUCKET" => "s3_bucket".into(),
                         "S3_REGION" => "s3_region".into(),
+                        "CLAMD_ADDR" => "clamd_addr".into(),
                         "GIT_REPOS_ROOT" => "git_repos_root".into(),
                         "MEDIA_ROOT" => "media_root".into(),
                         "CLICKHOUSE_URL" => "clickhouse_url".into(),
@@ -229,9 +236,10 @@ impl Config {
         };
         if s.is_empty() {
             // Dev fallback — deterministic but insecure; set TT_SECRETS_KEY in prod
+            // Exactly 16 + 16 bytes for the [u8; 32] fallback (lab only)
             let mut out = [0u8; 32];
-            out[..16].copy_from_slice(b"turing-tarpit-dev");
-            out[16..].copy_from_slice(b"-secrets-key!!!");
+            out[..16].copy_from_slice(b"turing-tarpit!!!"); // 16
+            out[16..].copy_from_slice(b"-secrets-key!!!!"); // 16
             return Ok(out);
         }
         let bytes = hex::decode(s).map_err(|e| anyhow::anyhow!("secrets_key hex: {e}"))?;

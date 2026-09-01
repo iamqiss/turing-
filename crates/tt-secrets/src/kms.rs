@@ -108,7 +108,7 @@ fn parse_local_key(hex_or_empty: &str) -> Result<[u8; 32]> {
         // Deterministic weak fallback for lab only — operators must set TT_SECRETS_KEY in prod
         let mut out = [0u8; 32];
         out[..16].copy_from_slice(b"tt-dev-only-kek!");
-        out[16..].copy_from_slice(b"-secrets-key!!!");
+        out[16..].copy_from_slice(b"-secrets-key!!!!"); // 16
         return Ok(out);
     }
     let bytes = hex::decode(s).map_err(|e| SecretsError::Crypto(format!("local key hex: {e}")))?;
@@ -599,5 +599,34 @@ pub fn unpack_wrapped(blob: &[u8]) -> Result<(String, String, Vec<u8>)> {
     } else {
         // Legacy: pure local AES wrap
         Ok(("local".into(), "legacy".into(), blob.to_vec()))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_wrap_unwrap_roundtrip() {
+        let mut key = [0u8; 32];
+        key[0] = 7;
+        let p = LocalKeyProvider {
+            key,
+            key_id: "test".into(),
+        };
+        let dek = [9u8; 32];
+        let wrapped = p.wrap_dek(&dek).await.unwrap();
+        let open = p.unwrap_dek(&wrapped).await.unwrap();
+        assert_eq!(open, dek);
+    }
+
+    #[test]
+    fn pack_unpack_metadata() {
+        let blob = pack_wrapped("tt", "scarlet-v1", b"ciphertext");
+        let (prov, kid, ct) = unpack_wrapped(&blob).unwrap();
+        assert_eq!(prov, "tt");
+        assert_eq!(kid, "scarlet-v1");
+        assert_eq!(ct, b"ciphertext");
     }
 }

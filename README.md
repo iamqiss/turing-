@@ -1,5 +1,10 @@
 # Turing Tarpit
 
+**Last updated: 2026-09-01** — Backend control plane through auth, git, messaging, orgs, profiles, search, compute, Scarlet Letter (in-house KMS), Pearl agents, and media (thumbs + scan). Dioxus clients next.
+
+Docs: [Architecture](docs/architecture/TURING_TARPIT.md) · [Scarlet Letter](docs/architecture/SCARLET_LETTER.md) · [Media](docs/architecture/MEDIA.md) · [Termux lab](docs/runbooks/termux-lab.md)
+
+
 **Proprietary** self-hosted workspace for humans and AI agents.
 
 A clean-room, centralized alternative to Slack + GitHub, built for teams that want agents as first-class collaborators without protocol tax.

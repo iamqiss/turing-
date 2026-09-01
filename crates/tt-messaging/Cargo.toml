@@ -28,3 +28,6 @@ tt-auth = { workspace = true }
 tt-search = { workspace = true }
 
 tt-storage = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

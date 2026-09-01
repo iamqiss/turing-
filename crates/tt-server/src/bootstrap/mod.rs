@@ -10,7 +10,7 @@ use tt_auth::{
     RedisCeremonyStore, SessionService, WebauthnService,
 };
 use tt_git::{IssueService, PostgresIssueStore, PostgresLabelStore, PostgresPullRequestStore, PostgresReviewStore, ReviewService, PostgresRepoStore, PostgresSettingsStore, PullRequestService, RepoService};
-use tt_messaging::{MessagingService, OrgService, PostgresMessageStore, PostgresOrgStore, PostgresWorkspaceStore, WorkspaceService};
+use tt_messaging::{MessagingService, OrgService, PostgresMessageStore, PostgresOrgStore, PostgresRoomStore, PostgresWorkspaceStore, RoomService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_config::Config;
 use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresLifecycleStore, PostgresProfileStore, ProfileService, LifecycleStore};
@@ -129,6 +129,10 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let events: Arc<dyn tt_realtime::EventPublisher> = realtime.clone();
     let messaging = Arc::new(MessagingService::new(msg_store, events));
     info!("messaging ready");
+
+    let rooms = Arc::new(RoomService::new(Arc::new(PostgresRoomStore::new(db.clone()))));
+    info!("rooms ready");
+
 
     // --- Workspaces ---
     let ws_store = Arc::new(PostgresWorkspaceStore::new(db.clone()));
@@ -322,6 +326,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         agents,
         scarlet,
         media,
+        rooms,
     })
 }
 

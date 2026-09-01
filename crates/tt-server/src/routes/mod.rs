@@ -22,7 +22,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 use tt_git::{git_http_router, GitHttpState};
-use tt_messaging::{messaging_http_router, MessagingHttpState};
+use tt_messaging::{messaging_http_router, rooms_http_router, MessagingHttpState, RoomsHttpState};
 
 use crate::push_observer::spawn_push_consumer;
 use crate::state::AppState;
@@ -41,6 +41,11 @@ pub fn router(state: AppState) -> Router {
         search: Some(state.search.clone()),
         media: Some(state.media.clone()),
     };
+    let rooms_state = RoomsHttpState {
+        rooms: state.rooms.clone(),
+        resolver: state.principal_resolver.clone(),
+    };
+
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -61,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .merge(dev::router())
         .with_state(state)
         .merge(messaging_http_router(msg_state))
+        .merge(rooms_http_router(rooms_state))
         .merge(git_http_router(git_state))
 }
 

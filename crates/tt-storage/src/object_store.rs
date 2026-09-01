@@ -114,3 +114,30 @@ fn sanitize_ext(ext: &str) -> &'static str {
         _ => "bin",
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[tokio::test]
+    async fn local_put_get_delete() {
+        let dir = env::temp_dir().join(format!("tt-obj-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = LocalObjectStore::new(&dir);
+        store.put("a/b.txt", b"hello", "text/plain").await.unwrap();
+        assert!(store.exists("a/b.txt").await.unwrap());
+        assert_eq!(store.get("a/b.txt").await.unwrap(), b"hello");
+        store.delete("a/b.txt").await.unwrap();
+        assert!(!store.exists("a/b.txt").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rejects_path_traversal() {
+        let dir = env::temp_dir().join(format!("tt-obj-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = LocalObjectStore::new(&dir);
+        assert!(store.put("../x", b"no", "text/plain").await.is_err());
+    }
+}

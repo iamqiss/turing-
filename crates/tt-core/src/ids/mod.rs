@@ -89,3 +89,34 @@ id_type!(SubnetId);
 id_type!(IpAllocationId);
 id_type!(ImageTemplateId);
 id_type!(RegionId);
+id_type!(RoomId);
+id_type!(RoomPostId);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn room_id_roundtrip_string() {
+        let id = RoomId::new();
+        let s = id.to_string();
+        let parsed = RoomId::from_str(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn ids_are_unique() {
+        let a = PrincipalId::new();
+        let b = PrincipalId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn from_uuid_preserves() {
+        let u = uuid::Uuid::now_v7();
+        let id = WorkspaceId::from_uuid(u);
+        assert_eq!(*id.as_uuid(), u);
+        assert_eq!(id.into_uuid(), u);
+    }
+}

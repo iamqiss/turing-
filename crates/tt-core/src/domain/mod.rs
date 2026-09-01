@@ -3,6 +3,7 @@
 mod principal;
 mod workspace;
 mod channel;
+mod room;
 mod message;
 mod repository;
 mod pull_request;
@@ -18,6 +19,7 @@ mod scarlet;
 
 pub use principal::*;
 pub use workspace::*;
+pub use room::{Room, RoomMember, RoomPost, RoomPostKind, RoomVisibility};
 pub use channel::*;
 pub use message::*;
 pub use repository::*;

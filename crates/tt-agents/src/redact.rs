@@ -67,3 +67,26 @@ fn sanitize_value(v: &mut serde_json::Value) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::ChatMessage;
+
+    #[test]
+    fn redact_chat_messages_mutates() {
+        let mut msgs = vec![ChatMessage {
+            role: "user".into(),
+            content: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+        }];
+        redact_chat_messages(&mut msgs);
+        assert!(msgs[0].content.contains("REDACTED") || !msgs[0].content.contains("ghp_"));
+    }
+
+    #[test]
+    fn sanitize_scarlet_put_value() {
+        let args = serde_json::json!({"name": "DB", "value": "super-secret-password-value"});
+        let s = sanitize_tool_args_for_context("scarlet_put_secret", &args);
+        assert_ne!(s["value"], "super-secret-password-value");
+    }
+}

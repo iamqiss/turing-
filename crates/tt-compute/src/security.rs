@@ -53,3 +53,20 @@ pub fn scope_workload_id(wl: &Workload, org_id: OrgId) -> Result<WorkloadId> {
     assert_workload_org(wl, org_id)?;
     Ok(wl.id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tt_core::ids::OrgId;
+
+    #[test]
+    fn same_org_ok() {
+        let o = OrgId::new();
+        assert!(assert_same_org(o, o).is_ok());
+    }
+
+    #[test]
+    fn different_org_err() {
+        assert!(assert_same_org(OrgId::new(), OrgId::new()).is_err());
+    }
+}

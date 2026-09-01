@@ -219,3 +219,15 @@ rm -f "$tmp"
 exit 0
 "#
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delete_ref_not_scanned() {
+        let report = scan_push_range(Path::new("."), ZERO, ZERO, &[]).await.unwrap();
+        // new==zero means delete; our code checks new_sha == ZERO first
+        assert!(!report.blocked);
+    }
+}

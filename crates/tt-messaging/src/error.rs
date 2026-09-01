@@ -19,3 +19,15 @@ pub enum MessagingError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_messages() {
+        assert_eq!(MessagingError::NotFound.to_string(), "not found");
+        assert!(MessagingError::Forbidden("x".into()).to_string().contains("forbidden"));
+        assert!(MessagingError::InvalidArgument("bad".into()).to_string().contains("bad"));
+    }
+}

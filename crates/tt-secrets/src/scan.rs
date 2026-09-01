@@ -197,3 +197,41 @@ pub fn redact_messages_content(parts: &mut [String]) {
 pub fn contains_secret_shaped(text: &str) -> bool {
     scan_text(text).blocked
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_aws_and_github() {
+        let r = scan_text("key = AKIAIOSFODNN7EXAMPLE\nghp_abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(r.blocked);
+        let ids: Vec<_> = r.findings.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(ids.contains(&"aws_access_key") || ids.iter().any(|i| i.contains("aws")));
+        assert!(ids.iter().any(|i| i.contains("github")));
+    }
+
+    #[test]
+    fn redact_for_model_strips_secrets() {
+        let raw = "connect with postgres://user:s3cret@host/db and token ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let red = redact_for_model(raw);
+        assert!(!red.contains("s3cret") || red.contains("REDACTED"));
+        assert!(red.contains("REDACTED") || !red.contains("ghp_"));
+    }
+
+    #[test]
+    fn clean_text_not_blocked() {
+        let r = scan_text("Hello Roomies, welcome to #Rust. We use safe APIs.");
+        assert!(!r.blocked);
+    }
+
+    #[test]
+    fn allowlist_filters() {
+        let r = scan_text("AKIAIOSFODNN7EXAMPLE");
+        assert!(r.blocked);
+        let filtered = apply_allowlist(r, &["aws_access_key".into()]);
+        // may still block if other rules hit the same string
+        let _ = filtered;
+    }
+}

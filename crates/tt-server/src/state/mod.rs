@@ -8,7 +8,7 @@ use tt_auth::{
 };
 use tt_config::Config;
 use tt_git::{IssueService, PullRequestService, RepoService, ReviewService};
-use tt_messaging::{MessagingService, OrgService, WorkspaceService};
+use tt_messaging::{MessagingService, OrgService, RoomService, WorkspaceService};
 use tt_realtime::InMemoryRealtime;
 use tt_storage::{ClickHouseClient, LifecycleStore, MediaService, ProfileService};
 use tt_compute::ComputeService;
@@ -41,4 +41,5 @@ pub struct AppState {
     pub agents: Arc<AgentHarness>,
     pub scarlet: Arc<SecretsService>,
     pub media: Arc<MediaService>,
+    pub rooms: Arc<RoomService>,
 }

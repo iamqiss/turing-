@@ -104,3 +104,38 @@ pub fn verify_request(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_box_roundtrip() {
+        let key = [42u8; 32];
+        let box_ = SecretBox::new(key);
+        let ct = box_.encrypt(b"deploy-token-secret").unwrap();
+        assert_ne!(ct, b"deploy-token-secret");
+        assert_eq!(box_.decrypt(&ct).unwrap(), b"deploy-token-secret");
+    }
+
+    #[test]
+    fn secret_box_tamper_fails() {
+        let box_ = SecretBox::new([1u8; 32]);
+        let mut ct = box_.encrypt(b"x").unwrap();
+        ct[15] ^= 0xff;
+        assert!(box_.decrypt(&ct).is_err());
+    }
+
+    #[test]
+    fn hmac_sign_verify_ok() {
+        let ts = chrono::Utc::now().timestamp();
+        let body = b"{\"ping\":true}";
+        let sig = sign_request("agent-token", ts, body);
+        assert!(verify_request("agent-token", ts, body, &sig, 3600).is_ok());
+    }
+
+    #[test]
+    fn hmac_bad_sig_fails() {
+        assert!(verify_request("agent-token", 1_700_000_000, b"body", "deadbeef", 3600).is_err());
+    }
+}

@@ -126,3 +126,25 @@ impl KmsEngine {
             .map_err(|_| KmsError::Crypto("unwrap".into()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wrap_unwrap_after_unlock() {
+        let eng = KmsEngine::new_locked();
+        assert!(eng.is_locked().await);
+        let mut master = [0u8; 32];
+        master[3] = 9;
+        eng.unlock("k1", master).await.unwrap();
+        assert!(!eng.is_locked().await);
+        let dek = [5u8; 32];
+        let w = eng.wrap(Some("k1"), &dek).await.unwrap();
+        let open = eng.unwrap(Some("k1"), &w).await.unwrap();
+        assert_eq!(open, dek);
+        eng.lock().await;
+        assert!(eng.is_locked().await);
+        assert!(eng.wrap(None, &dek).await.is_err());
+    }
+}

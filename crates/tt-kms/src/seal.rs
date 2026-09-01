@@ -65,3 +65,23 @@ pub fn unseal_master_key(blob: &[u8], passphrase: &str) -> Result<[u8; 32]> {
     key.copy_from_slice(&plain);
     Ok(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seal_unseal_roundtrip() {
+        let master = generate_master_key();
+        let sealed = seal_master_key(&master, "correct-horse").unwrap();
+        let open = unseal_master_key(&sealed, "correct-horse").unwrap();
+        assert_eq!(open, master);
+    }
+
+    #[test]
+    fn bad_passphrase_fails() {
+        let master = generate_master_key();
+        let sealed = seal_master_key(&master, "right").unwrap();
+        assert!(unseal_master_key(&sealed, "wrong").is_err());
+    }
+}

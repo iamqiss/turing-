@@ -3,7 +3,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, patch};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tt_auth::extract_bearer;
@@ -30,7 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/orgs/:slug/deploy", post(deploy))
         .route(
             "/api/orgs/:slug/compute-quota",
-            get(get_quota).patch(patch_quota),
+            get(get_quota).put(set_quota),
         )
         .route(
             "/api/orgs/:slug/lifecycle-events",
@@ -262,6 +262,21 @@ async fn create_workload(
                 .into_response();
         }
     };
+    if let Err(e) = state.billing.assert_org_active(org.id).await {
+        return (StatusCode::FORBIDDEN, e.to_string()).into_response();
+    }
+    if state
+        .orgs
+        .require_permission(
+            org.id,
+            ctx.principal_id(),
+            tt_core::domain::OrgPermission::CreateWorkload,
+        )
+        .await
+        .is_err()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(shape) = WorkloadShape::parse(&body.shape) else {
         return (StatusCode::BAD_REQUEST, "shape: serverless|vm|kata").into_response();
     };
@@ -408,6 +423,9 @@ async fn start_workload(
     {
         return StatusCode::NOT_FOUND.into_response();
     }
+    if let Err(e) = state.billing.assert_org_active(wl.org_id).await {
+        return (StatusCode::FORBIDDEN, e.to_string()).into_response();
+    }
     match state.compute.start(wid).await {
         Ok(inst) => Json(serde_json::json!({
             "instance_id": inst.id.to_string(),
@@ -448,6 +466,22 @@ async fn stop_workload(
         .is_err()
     {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    // Meter before stop so we still have instance timestamps
+    let instances = state.compute.list_instances(wid).await.unwrap_or_default();
+    let now_ts = chrono::Utc::now().timestamp();
+    for inst in &instances {
+        let secs = (now_ts - inst.created_at.timestamp()).max(0) as f64;
+        let hours = secs / 3600.0;
+        let _ = state
+            .billing
+            .emit_compute_hours(
+                wl.org_id,
+                wl.resources.vcpu,
+                hours,
+                Some(inst.id.to_string()),
+            )
+            .await;
     }
     match state.compute.stop(wid).await {
         Ok(()) => Json(serde_json::json!({ "stopped": true })).into_response(),
@@ -678,19 +712,32 @@ async fn get_quota(
     }
 }
 
-async fn patch_quota(
+async fn set_quota(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
     Json(body): Json<PatchQuotaBody>,
 ) -> impl IntoResponse {
-    if require_auth(&state, &headers).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
     let org = match state.orgs.get_by_slug(&slug).await {
         Ok(o) => o,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
+    if state
+        .orgs
+        .require_permission(
+            org.id,
+            ctx.principal_id(),
+            tt_core::domain::OrgPermission::ManageQuotas,
+        )
+        .await
+        .is_err()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     // Merge with current limits
     let cur = match state.compute.get_quota_usage(org.id).await {
         Ok(q) => q,

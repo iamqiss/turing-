@@ -129,7 +129,11 @@ See [SCARLET_LETTER.md](./SCARLET_LETTER.md) and [MEDIA.md](./MEDIA.md).
 - **On-device redaction** of secret-shaped content before every inference call
 - Step logs store sanitized args/results
 
-### 2.11 Compute (`tt-compute`, `tt-net`, `tt-node`)
+### 2.11 Billing (`tt-billing`)
+
+Dual-track: **seats** (collab) + **usage meters** (compute, git/media storage, managed Postgres/EmberDB/RustFS/Greptime). Catalog undercuts GH+Slack sum; compute never unlimited on seats. See [BILLING.md](./BILLING.md).
+
+### 2.12 Compute (`tt-compute`, `tt-net`, `tt-node`)
 
 Bare metal economics (Latitude / OVH / Hetzner-class):
 
@@ -174,6 +178,7 @@ tt-api             shared API types
 tt-audit           audit trail helpers
 tt-notifications   notification stubs
 tt-workflows       workflow stubs
+tt-billing         seats + usage meters + managed data pricing
 tt-common          shared utilities
 ```
 
@@ -274,7 +279,7 @@ See [runbooks/termux-lab.md](../runbooks/termux-lab.md).
 - **Rooms** (video) + Roomies; richer channel media UX
 - Apache **Iggy** fanout when Redis pub/sub is the bottleneck
 - Hardened org **RBAC** + strict human approval for agentic dangerous actions
-- Billing depth / platform admin finance views
+- Billing depth refinements (SKU matrix, COGS ledger automation)
 - Managed databases as a product surface
 - mTLS CP ↔ tt-kms / tt-node (HMAC today)
 - Argon2 for KMS unseal (SHA-256 lab derivation today)

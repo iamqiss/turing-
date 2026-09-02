@@ -62,6 +62,34 @@ pub fn router(state: GitHttpState) -> Router {
 }
 
 /// Clone URL path shape: `/git/{workspace_id}/{repo_name}.git` or without `.git`
+
+/// Returns true if push is allowed (active billing or no org/account).
+async fn org_allows_push(pool: &sqlx::PgPool, workspace_id: WorkspaceId) -> bool {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        r#"
+        SELECT ba.status
+        FROM workspaces w
+        LEFT JOIN billing_accounts ba ON ba.org_id = w.org_id
+        WHERE w.id = $1
+        "#,
+    )
+    .bind(workspace_id.as_uuid())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        None => true,
+        Some((None,)) => true, // workspace with no org or no billing row
+        Some((Some(status),)) => {
+            !matches!(
+                status.as_str(),
+                "suspended" | "canceled" | "cancelled" | "unpaid" | "past_due"
+            )
+        }
+    }
+}
+
 fn normalize_name(name: &str) -> &str {
     name.strip_suffix(".git").unwrap_or(name)
 }
@@ -274,6 +302,17 @@ async fn receive_pack(
         Ok(p) => p,
         Err(r) => return r,
     };
+    if let Some(pool) = state.deploy_pool.as_ref() {
+        if let Ok(ws_id) = workspace_id.parse::<WorkspaceId>() {
+            if !org_allows_push(pool, ws_id).await {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "organization billing status blocks push (suspended/canceled/unpaid)",
+                )
+                    .into_response();
+            }
+        }
+    }
     // Ensure Scarlet Letter pre-receive is present (blocks secret-shaped pushes)
     if let Err(e) = crate::hooks::ensure_protection_hook(&path).await {
         warn!(error = %e, "ensure push protection hook failed");

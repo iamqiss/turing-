@@ -28,6 +28,7 @@ pub trait OrgStore: Send + Sync {
         principal_id: PrincipalId,
     ) -> Result<Option<OrgMember>>;
     async fn list_members(&self, org_id: OrgId) -> Result<Vec<OrgMember>>;
+    async fn delete_member(&self, org_id: OrgId, principal_id: PrincipalId) -> Result<()>;
     async fn count_seats_used(&self, org_id: OrgId) -> Result<u32>;
     async fn update_seat_limit(&self, org_id: OrgId, limit: u32) -> Result<()>;
     async fn insert_invitation(&self, inv: &OrgInvitation) -> Result<()>;
@@ -228,6 +229,17 @@ impl OrgStore for PostgresOrgStore {
         .await
         .map_err(|e| MessagingError::Other(e.into()))?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    
+    async fn delete_member(&self, org_id: OrgId, principal_id: PrincipalId) -> Result<()> {
+        sqlx::query("DELETE FROM org_members WHERE org_id = $1 AND principal_id = $2")
+            .bind(org_id.as_uuid())
+            .bind(principal_id.as_uuid())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MessagingError::Other(e.into()))?;
+        Ok(())
     }
 
     async fn count_seats_used(&self, org_id: OrgId) -> Result<u32> {
@@ -433,15 +445,59 @@ impl OrgService {
     }
 
     pub async fn require_admin(&self, org_id: OrgId, principal_id: PrincipalId) -> Result<()> {
+        self.require_permission(org_id, principal_id, tt_core::domain::OrgPermission::ManageOrgSettings)
+            .await
+    }
+
+    pub async fn require_owner(&self, org_id: OrgId, principal_id: PrincipalId) -> Result<()> {
         let m = self
             .store
             .get_member(org_id, principal_id)
             .await?
             .ok_or(MessagingError::Forbidden("not an org member".into()))?;
-        if !m.role.is_adminish() {
-            return Err(MessagingError::Forbidden("org admin required".into()));
+        if !matches!(m.role, OrgRole::Owner) {
+            return Err(MessagingError::Forbidden("org owner required".into()));
+        }
+        if matches!(m.seat_status, tt_core::domain::SeatStatus::Suspended) {
+            return Err(MessagingError::Forbidden("seat suspended".into()));
         }
         Ok(())
+    }
+
+    pub async fn require_permission(
+        &self,
+        org_id: OrgId,
+        principal_id: PrincipalId,
+        perm: tt_core::domain::OrgPermission,
+    ) -> Result<()> {
+        let m = self
+            .store
+            .get_member(org_id, principal_id)
+            .await?
+            .ok_or(MessagingError::Forbidden("not an org member".into()))?;
+        if matches!(m.seat_status, tt_core::domain::SeatStatus::Suspended) {
+            return Err(MessagingError::Forbidden("seat suspended".into()));
+        }
+        if !m.role.allows(perm) {
+            return Err(MessagingError::Forbidden(format!(
+                "missing permission: {}",
+                perm.as_str()
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn member_role(
+        &self,
+        org_id: OrgId,
+        principal_id: PrincipalId,
+    ) -> Result<OrgRole> {
+        let m = self
+            .store
+            .get_member(org_id, principal_id)
+            .await?
+            .ok_or(MessagingError::Forbidden("not an org member".into()))?;
+        Ok(m.role)
     }
 
     /// Active seat only — suspended members cannot mutate compute.
@@ -458,6 +514,112 @@ impl OrgService {
         if matches!(m.seat_status, tt_core::domain::SeatStatus::Suspended) {
             return Err(MessagingError::Forbidden("seat suspended".into()));
         }
+        Ok(())
+    }
+
+
+    async fn count_owners(&self, org_id: OrgId) -> Result<u32> {
+        let members = self.store.list_members(org_id).await?;
+        Ok(members
+            .iter()
+            .filter(|m| matches!(m.role, OrgRole::Owner) && matches!(m.seat_status, tt_core::domain::SeatStatus::Active))
+            .count() as u32)
+    }
+
+    /// Change a member's role. Cannot leave org without an owner. Cannot escalate above actor.
+    pub async fn set_member_role(
+        &self,
+        org_id: OrgId,
+        actor_id: PrincipalId,
+        target_id: PrincipalId,
+        new_role: OrgRole,
+    ) -> Result<OrgMember> {
+        self.require_permission(org_id, actor_id, tt_core::domain::OrgPermission::ChangeRoles)
+            .await?;
+        if matches!(new_role, OrgRole::Owner) {
+            self.require_owner(org_id, actor_id).await?;
+        }
+        let actor = self
+            .store
+            .get_member(org_id, actor_id)
+            .await?
+            .ok_or(MessagingError::Forbidden("not an org member".into()))?;
+        // Actor cannot grant a role above their own (except owner promoting admin is fine; owner is top)
+        if new_role.rank() > actor.role.rank() {
+            return Err(MessagingError::Forbidden(
+                "cannot grant a role higher than your own".into(),
+            ));
+        }
+        let mut target = self
+            .store
+            .get_member(org_id, target_id)
+            .await?
+            .ok_or(MessagingError::NotFound)?;
+        if matches!(target.role, OrgRole::Owner) && !matches!(new_role, OrgRole::Owner) {
+            if self.count_owners(org_id).await? <= 1 {
+                return Err(MessagingError::Conflict(
+                    "cannot demote the last owner".into(),
+                ));
+            }
+            // only another owner may demote an owner
+            if !matches!(actor.role, OrgRole::Owner) {
+                return Err(MessagingError::Forbidden("only owner can demote an owner".into()));
+            }
+        }
+        target.role = new_role;
+        self.store.add_member(&target).await?;
+        Ok(target)
+    }
+
+    pub async fn transfer_ownership(
+        &self,
+        org_id: OrgId,
+        actor_id: PrincipalId,
+        new_owner_id: PrincipalId,
+    ) -> Result<()> {
+        self.require_owner(org_id, actor_id).await?;
+        if actor_id == new_owner_id {
+            return Ok(());
+        }
+        let mut target = self
+            .store
+            .get_member(org_id, new_owner_id)
+            .await?
+            .ok_or(MessagingError::NotFound)?;
+        let mut actor = self
+            .store
+            .get_member(org_id, actor_id)
+            .await?
+            .ok_or(MessagingError::Forbidden("not an org member".into()))?;
+        target.role = OrgRole::Owner;
+        actor.role = OrgRole::Admin;
+        self.store.add_member(&target).await?;
+        self.store.add_member(&actor).await?;
+        Ok(())
+    }
+
+    pub async fn remove_member(
+        &self,
+        org_id: OrgId,
+        actor_id: PrincipalId,
+        target_id: PrincipalId,
+    ) -> Result<()> {
+        self.require_permission(org_id, actor_id, tt_core::domain::OrgPermission::RemoveMembers)
+            .await?;
+        let target = self
+            .store
+            .get_member(org_id, target_id)
+            .await?
+            .ok_or(MessagingError::NotFound)?;
+        if matches!(target.role, OrgRole::Owner) {
+            if self.count_owners(org_id).await? <= 1 {
+                return Err(MessagingError::Conflict(
+                    "cannot remove the last owner".into(),
+                ));
+            }
+            self.require_owner(org_id, actor_id).await?;
+        }
+        self.store.delete_member(org_id, target_id).await?;
         Ok(())
     }
 

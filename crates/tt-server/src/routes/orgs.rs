@@ -18,6 +18,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/orgs/:slug", get(get_one))
         .route("/api/orgs/:slug/billing", get(billing))
         .route("/api/orgs/:slug/members", get(list_members))
+        .route("/api/orgs/:slug/members/:principal_id/role", post(set_member_role))
+        .route("/api/orgs/:slug/members/:principal_id", axum::routing::delete(remove_member))
+        .route("/api/orgs/:slug/transfer-ownership", post(transfer_ownership))
         .route(
             "/api/orgs/:slug/invitations",
             post(invite).get(list_invitations),
@@ -579,6 +582,105 @@ async fn link_stripe(
             "customer_id": body.customer_id
         }))
         .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+
+#[derive(Deserialize)]
+struct RoleBody {
+    role: String,
+}
+
+async fn set_member_role(
+    State(state): State<AppState>,
+    Path((slug, principal_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<RoleBody>,
+) -> impl IntoResponse {
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    let Some(role) = OrgRole::parse(&body.role) else {
+        return (StatusCode::BAD_REQUEST, "role: owner|admin|member|billing").into_response();
+    };
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Ok(target) = principal_id.parse::<tt_core::ids::PrincipalId>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state
+        .orgs
+        .set_member_role(org.id, ctx.principal_id(), target, role)
+        .await
+    {
+        Ok(m) => Json(serde_json::json!({
+            "principal_id": m.principal_id.to_string(),
+            "role": m.role.as_str(),
+            "seat_status": m.seat_status.as_str(),
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+async fn remove_member(
+    State(state): State<AppState>,
+    Path((slug, principal_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Ok(target) = principal_id.parse::<tt_core::ids::PrincipalId>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state
+        .orgs
+        .remove_member(org.id, ctx.principal_id(), target)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct TransferBody {
+    new_owner_id: String,
+}
+
+async fn transfer_ownership(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<TransferBody>,
+) -> impl IntoResponse {
+    let ctx = match require_auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Ok(new_owner) = body.new_owner_id.parse::<tt_core::ids::PrincipalId>() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state
+        .orgs
+        .transfer_ownership(org.id, ctx.principal_id(), new_owner)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => map_err(e),
     }
 }

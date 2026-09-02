@@ -7,7 +7,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tt_core::domain::SecretValueKind;
-use tt_core::ids::{OrgId, RepositoryId};
+use tt_core::ids::{RepositoryId};
 use tt_secrets::{scan_text, SecretsError};
 
 use crate::state::AppState;

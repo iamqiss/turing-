@@ -64,6 +64,8 @@ pub struct Config {
 
     /// Comma-separated principal UUIDs allowed to register compute nodes (empty = deny all except DB table)
     pub platform_operator_ids: String,
+    /// Platform superadmins (comma UUIDs). Defaults to platform_operator_ids if empty.
+    pub superadmin_ids: String,
 
     /// 32-byte hex key for encrypting secrets at rest (agent tokens, deploy tokens).
     /// Falls back to session_key if empty. Also used as local KMS KEK when kms_provider=local.
@@ -119,6 +121,7 @@ impl Default for Config {
             stripe_webhook_secret: String::new(),
             stripe_price_id: String::new(),
             platform_operator_ids: String::new(),
+            superadmin_ids: String::new(),
             secrets_key: String::new(),
             kms_provider: "local".into(), // lab; production: "tt"
             kms_key_id: "scarlet".into(),
@@ -194,6 +197,7 @@ impl Config {
                         "STRIPE_WEBHOOK_SECRET" => "stripe_webhook_secret".into(),
                         "STRIPE_PRICE_ID" => "stripe_price_id".into(),
                         "PLATFORM_OPERATOR_IDS" => "platform_operator_ids".into(),
+                        "SUPERADMIN_IDS" => "superadmin_ids".into(),
                         "SECRETS_KEY" => "secrets_key".into(),
                         "KMS_PROVIDER" => "kms_provider".into(),
                         "KMS_KEY_ID" => "kms_key_id".into(),
@@ -249,6 +253,25 @@ impl Config {
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
         Ok(out)
+    }
+
+    
+    pub fn superadmin_id_list(&self) -> Vec<String> {
+        let own = self
+            .superadmin_ids
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+        if !own.is_empty() {
+            own
+        } else {
+            self.platform_operator_id_list()
+        }
+    }
+
+    pub fn is_superadmin(&self, principal_id: &str) -> bool {
+        self.superadmin_id_list().iter().any(|id| id == principal_id)
     }
 
     pub fn platform_operator_id_list(&self) -> Vec<String> {

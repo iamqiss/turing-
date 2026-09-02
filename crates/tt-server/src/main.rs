@@ -3,6 +3,7 @@
 //! - HTTP  :8080  – health, REST APIs, Git Smart HTTP
 //! - gRPC  :50051 – Auth + Messaging (HTTP/2) + gRPC-Web (HTTP/1.1)
 
+mod authz;
 mod bootstrap;
 mod routes;
 mod state;

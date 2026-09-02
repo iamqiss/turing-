@@ -15,6 +15,8 @@ use tt_compute::ComputeService;
 use tt_search::SearchService;
 use tt_agents::AgentHarness;
 use tt_secrets::SecretsService;
+use tt_billing::BillingService;
+use tt_pipelines::TaskService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -42,4 +44,6 @@ pub struct AppState {
     pub scarlet: Arc<SecretsService>,
     pub media: Arc<MediaService>,
     pub rooms: Arc<RoomService>,
+    pub billing: Arc<BillingService>,
+    pub tasks: Arc<TaskService>,
 }

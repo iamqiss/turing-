@@ -302,6 +302,7 @@ pub enum LifecycleKind {
     NatAllocated,
     NatReleased,
     QuotaExceeded,
+    OrgSuspended,
     ProviderDispatchFailed,
 }
 
@@ -322,6 +323,7 @@ impl LifecycleKind {
             Self::NatAllocated => "nat_allocated",
             Self::NatReleased => "nat_released",
             Self::QuotaExceeded => "quota_exceeded",
+            Self::OrgSuspended => "org_suspended",
             Self::ProviderDispatchFailed => "provider_dispatch_failed",
         }
     }
@@ -342,6 +344,7 @@ impl LifecycleKind {
             "nat_allocated" => Some(Self::NatAllocated),
             "nat_released" => Some(Self::NatReleased),
             "quota_exceeded" => Some(Self::QuotaExceeded),
+            "org_suspended" => Some(Self::OrgSuspended),
             "provider_dispatch_failed" => Some(Self::ProviderDispatchFailed),
             _ => None,
         }

@@ -20,6 +20,8 @@ use tt_agents::{AgentHarness, BuiltinTools, InferenceClient, PostgresAgentStore}
 use tt_secrets::{PostgresSecretsStore, SecretsService};
 use tt_storage::{LocalObjectStore, MediaService};
 use tt_net::PostgresIpAllocator;
+use tt_billing::{BillingService, PostgresBillingStore};
+use tt_pipelines::{PostgresTaskStore, TaskService};
 
 use crate::state::AppState;
 
@@ -132,6 +134,17 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
 
     let rooms = Arc::new(RoomService::new(Arc::new(PostgresRoomStore::new(db.clone()))));
     info!("rooms ready");
+
+    let billing = Arc::new(BillingService::new(Arc::new(PostgresBillingStore::new(db.clone()))));
+    info!("billing ready (seats + usage meters)");
+
+    let tasks = Arc::new(TaskService::new(
+        Arc::new(PostgresTaskStore::new(db.clone())),
+        billing.clone(),
+    ));
+    info!("turing tasks ready (.tt/pipelines)");
+
+
 
 
     // --- Workspaces ---
@@ -327,6 +340,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         scarlet,
         media,
         rooms,
+        billing,
+        tasks,
     })
 }
 

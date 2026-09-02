@@ -90,6 +90,22 @@ async fn start_run(
         Ok(c) => c,
         Err(s) => return s.into_response(),
     };
+    if let Some(ref oid) = body.org_id {
+        if let Ok(org_id) = oid.parse::<tt_core::ids::OrgId>() {
+            if state
+                .orgs
+                .require_permission(
+                    org_id,
+                    ctx.principal_id(),
+                    tt_core::domain::OrgPermission::RunAgentSafe,
+                )
+                .await
+                .is_err()
+            {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
     let ws = match body.workspace_id.as_deref() {
         Some(s) => match s.parse::<WorkspaceId>() {
             Ok(id) => Some(id),

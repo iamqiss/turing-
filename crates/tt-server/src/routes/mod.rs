@@ -9,6 +9,8 @@ mod issues;
 mod reviews;
 mod orgs;
 mod billing;
+mod tasks;
+mod admin;
 mod compute;
 mod search;
 mod agents;
@@ -58,6 +60,8 @@ pub fn router(state: AppState) -> Router {
         .merge(reviews::router())
         .merge(orgs::router())
         .merge(billing::router())
+        .merge(tasks::router())
+        .merge(admin::router())
         .merge(compute::router())
         .merge(search::router())
         .merge(agents::router())

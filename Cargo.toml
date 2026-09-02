@@ -13,8 +13,9 @@ members = [
     "crates/tt-agents",
     "crates/tt-secrets",
     "crates/tt-kms",
+    "crates/tt-billing",
     "crates/tt-audit",
-    "crates/tt-workflows",
+    "crates/tt-pipelines",
     "crates/tt-notifications",
     "crates/tt-api",
     "crates/tt-server"
@@ -101,8 +102,9 @@ tt-realtime = { path = "crates/tt-realtime" }
 tt-agents = { path = "crates/tt-agents" }
 tt-secrets = { path = "crates/tt-secrets" }
 tt-kms = { path = "crates/tt-kms" }
+tt-billing = { path = "crates/tt-billing" }
 tt-audit = { path = "crates/tt-audit" }
-tt-workflows = { path = "crates/tt-workflows" }
+tt-pipelines = { path = "crates/tt-pipelines" }
 tt-notifications = { path = "crates/tt-notifications" }
 tt-api = { path = "crates/tt-api" }
 

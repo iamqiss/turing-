@@ -5,7 +5,6 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -181,11 +180,30 @@ async fn upload_attachment(
         .upload_attachment(ctx.principal_id(), ws, &filename, &content_type, &data)
         .await
     {
-        Ok(m) => (
-            StatusCode::CREATED,
-            Json(media_json(&m, "/api/media")),
-        )
-            .into_response(),
+        Ok(m) => {
+            // Best-effort usage: workspace → org
+            if let Ok(Some((org_id,))) = sqlx::query_as::<_, (uuid::Uuid,)>(
+                "SELECT org_id FROM workspaces WHERE id = $1 AND org_id IS NOT NULL",
+            )
+            .bind(ws)
+            .fetch_optional(&state.db)
+            .await
+            {
+                let _ = state
+                    .billing
+                    .emit_media_bytes(
+                        tt_core::ids::OrgId::from_uuid(org_id),
+                        m.size_bytes,
+                        Some(m.id.to_string()),
+                    )
+                    .await;
+            }
+            (
+                StatusCode::CREATED,
+                Json(media_json(&m, "/api/media")),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "attachment upload");
             (StatusCode::BAD_REQUEST, e.to_string()).into_response()

@@ -11,7 +11,7 @@ use tt_auth::{
 };
 use tt_git::{IssueService, PostgresIssueStore, PostgresLabelStore, PostgresPullRequestStore, PostgresReviewStore, ReviewService, PostgresRepoStore, PostgresSettingsStore, PullRequestService, RepoService};
 use tt_messaging::{MessagingService, OrgService, PostgresMessageStore, PostgresOrgStore, PostgresRoomStore, PostgresWorkspaceStore, RoomService, WorkspaceService};
-use tt_realtime::InMemoryRealtime;
+use tt_realtime::{IggyConfig, IggyRealtime, InMemoryRealtime};
 use tt_config::Config;
 use tt_storage::{ClickHouseClient, PostgresContributionStore, PostgresLifecycleStore, PostgresProfileStore, ProfileService, LifecycleStore};
 use tt_compute::{ComputeService, HttpProvider, Orchestrator, OrchestratorConfig, PostgresComputeStore};
@@ -125,10 +125,40 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let reviews = Arc::new(ReviewService::new(review_store, pr_store as Arc<dyn tt_git::PullRequestStore>));
     info!("reviews ready");
 
-    // --- Messaging + realtime ---
-    let realtime = Arc::new(InMemoryRealtime::new());
+    // --- Messaging + realtime (memory | redis | iggy) ---
+    let local_rt = Arc::new(InMemoryRealtime::new());
+    let backend = config.realtime_backend.to_ascii_lowercase();
+    let events: Arc<dyn tt_realtime::EventPublisher> = match backend.as_str() {
+        "iggy" => {
+            let iggy_cfg = IggyConfig::from_parts(
+                config.iggy_url.clone(),
+                config.iggy_username.clone(),
+                config.iggy_password.clone(),
+                config.iggy_stream.clone(),
+                config.iggy_topic.clone(),
+            );
+            match IggyRealtime::connect(local_rt.clone(), iggy_cfg).await {
+                Ok(bus) => {
+                    info!(url = %config.iggy_url, "realtime backend: iggy");
+                    Arc::new(bus)
+                }
+                Err(e) => {
+                    warn!(error = %e, "iggy connect failed — falling back to memory");
+                    local_rt.clone()
+                }
+            }
+        }
+        "redis" => {
+            warn!("realtime_backend=redis not fully wired; using memory");
+            local_rt.clone()
+        }
+        _ => {
+            info!("realtime backend: memory");
+            local_rt.clone()
+        }
+    };
+    let realtime = local_rt; // subscribers always attach to local mirror
     let msg_store = Arc::new(PostgresMessageStore::new(db.clone()));
-    let events: Arc<dyn tt_realtime::EventPublisher> = realtime.clone();
     let messaging = Arc::new(MessagingService::new(msg_store, events));
     info!("messaging ready");
 

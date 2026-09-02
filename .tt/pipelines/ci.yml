@@ -1,0 +1,40 @@
+# Turing Tarpit — primary CI (dogfood on Turing Tasks, not GitHub Actions)
+name: ci
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: tt-linux-latest
+    steps:
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: tt-linux-latest
+    steps:
+      - name: Clippy (deny warnings on core path)
+        run: |
+          cargo clippy -p tt-core -p tt-pipelines -p tt-billing -p tt-server -- \
+            -D warnings
+
+  test-unit:
+    name: test-unit
+    runs-on: tt-linux-latest
+    steps:
+      - name: Unit tests (no external services)
+        run: |
+          cargo test -p tt-core -p tt-pipelines -p tt-billing --lib
+
+  test-server:
+    name: test-server
+    runs-on: tt-linux-latest
+    steps:
+      - name: Server crate tests
+        run: cargo test -p tt-server --lib -- --nocapture

@@ -73,6 +73,37 @@ impl MessagingService {
         Ok(channel)
     }
 
+
+    /// Open or reuse a 1:1 DM between `caller` and `peer` in the workspace.
+    pub async fn open_direct_message(
+        &self,
+        workspace_id: WorkspaceId,
+        caller: PrincipalId,
+        peer: PrincipalId,
+    ) -> Result<Channel> {
+        if caller == peer {
+            return Err(MessagingError::InvalidArgument(
+                "cannot open a DM with yourself".into(),
+            ));
+        }
+        if let Some(existing) = self
+            .store
+            .find_direct_channel(workspace_id, caller, peer)
+            .await?
+        {
+            return Ok(existing);
+        }
+        self.create_channel(
+            workspace_id,
+            ChannelKind::Direct,
+            None,
+            None,
+            caller,
+            vec![caller, peer],
+        )
+        .await
+    }
+
     pub async fn list_channels(
         &self,
         workspace_id: WorkspaceId,

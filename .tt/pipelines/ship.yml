@@ -1,0 +1,41 @@
+# Gate before promoting a build onto Latitude / OVH bare metal
+name: ship
+on:
+  workflow_dispatch:
+  push:
+    branches: [release, production]
+
+jobs:
+  workspace:
+    name: workspace-build
+    runs-on: tt-linux-latest
+    steps:
+      - name: Full workspace compile
+        run: cargo build --workspace --release
+
+  pipelines:
+    name: pipelines-crate
+    runs-on: tt-linux-latest
+    steps:
+      - name: Test tt-pipelines
+        run: cargo test -p tt-pipelines
+
+  billing:
+    name: billing-crate
+    runs-on: tt-linux-latest
+    steps:
+      - name: Test tt-billing
+        run: cargo test -p tt-billing
+
+  secrets:
+    name: scarlet-scan
+    runs-on: tt-linux-latest
+    steps:
+      - name: Ensure no plaintext secret patterns in tree
+        run: |
+          # Lightweight guard; Scarlet Letter push-protection is the real gate
+          ! grep -RInE '(api[_-]?key|secret|password)\s*=\s*["'\''][^"'\'']{12,}' \
+            --include='*.rs' --include='*.toml' --include='*.yml' \
+            crates deploy config 2>/dev/null \
+            | grep -v 'test\|example\|mock\|TODO' \
+            && echo "scarlet scan clean"

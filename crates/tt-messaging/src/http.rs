@@ -32,6 +32,10 @@ pub fn router(state: MessagingHttpState) -> Router {
             post(create_channel).get(list_channels),
         )
         .route(
+            "/api/workspaces/:workspace_id/dms",
+            post(open_dm),
+        )
+        .route(
             "/api/channels/:channel_id",
             get(get_channel),
         )
@@ -187,6 +191,42 @@ async fn create_channel(
     match state
         .messaging
         .create_channel(ws, kind, body.name, body.topic, ctx.principal_id(), members)
+        .await
+    {
+        Ok(ch) => (StatusCode::CREATED, Json(channel_json(&ch))).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
+struct OpenDmBody {
+    /// Other participant principal id
+    peer_id: String,
+}
+
+/// Find-or-create a 1:1 DM with `peer_id` in this workspace.
+async fn open_dm(
+    State(state): State<MessagingHttpState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<OpenDmBody>,
+) -> impl IntoResponse {
+    let ctx = match auth(&state, &headers).await {
+        Ok(c) => c,
+        Err(s) => return s.into_response(),
+    };
+    let ws: WorkspaceId = match workspace_id.parse() {
+        Ok(w) => w,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let peer: PrincipalId = match body.peer_id.parse() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid peer_id").into_response(),
+    };
+    match state
+        .messaging
+        .open_direct_message(ws, ctx.principal_id(), peer)
         .await
     {
         Ok(ch) => (StatusCode::CREATED, Json(channel_json(&ch))).into_response(),

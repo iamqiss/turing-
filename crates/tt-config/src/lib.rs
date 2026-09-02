@@ -26,6 +26,12 @@ pub struct Config {
     pub meili_master_key: String,
 
     pub realtime_backend: String,
+    /// Iggy HTTP base (e.g. http://127.0.0.1:3000). Used when realtime_backend=iggy.
+    pub iggy_url: String,
+    pub iggy_username: String,
+    pub iggy_password: String,
+    pub iggy_stream: String,
+    pub iggy_topic: String,
 
     // Auth
     pub webauthn_rp_id: String,
@@ -98,7 +104,12 @@ impl Default for Config {
             redis_url: "redis://localhost:6379".into(),
             meili_url: "http://localhost:7700".into(),
             meili_master_key: "turing-dev-master-key-change-me".into(),
-            realtime_backend: "redis".into(),
+            realtime_backend: "memory".into(),
+            iggy_url: "http://127.0.0.1:3000".into(),
+            iggy_username: "iggy".into(),
+            iggy_password: "iggy".into(),
+            iggy_stream: "tt".into(),
+            iggy_topic: "events".into(),
             webauthn_rp_id: "localhost".into(),
             webauthn_rp_origin: "http://localhost:8080".into(),
             webauthn_rp_name: "Turing Tarpit".into(),
@@ -208,6 +219,11 @@ impl Config {
                         "INFERENCE_MODEL" => "inference_model".into(),
                         "INFERENCE_API_KEY" => "inference_api_key".into(),
                         "REALTIME_BACKEND" => "realtime_backend".into(),
+                        "IGGY_URL" => "iggy_url".into(),
+                        "IGGY_USERNAME" => "iggy_username".into(),
+                        "IGGY_PASSWORD" => "iggy_password".into(),
+                        "IGGY_STREAM" => "iggy_stream".into(),
+                        "IGGY_TOPIC" => "iggy_topic".into(),
                         other => other.into(),
                     }),
             );

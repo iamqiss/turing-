@@ -1,7 +1,13 @@
 host = "0.0.0.0"
 port = 8080
 grpc_port = 50051
-realtime_backend = "redis"
+realtime_backend = "memory"
+# memory | redis | iggy
+iggy_url = "http://127.0.0.1:3000"
+iggy_username = "iggy"
+iggy_password = "iggy"
+iggy_stream = "tt"
+iggy_topic = "events"
 
 webauthn_rp_id = "localhost"
 webauthn_rp_origin = "http://localhost:8080"

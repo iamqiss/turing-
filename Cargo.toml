@@ -18,7 +18,10 @@ members = [
     "crates/tt-pipelines",
     "crates/tt-notifications",
     "crates/tt-api",
-    "crates/tt-server"
+    "crates/tt-server",
+    "clients/tt-ui",
+    "clients/web",
+    "clients/desktop",
 ]
 
 [workspace.package]

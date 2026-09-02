@@ -21,6 +21,13 @@ pub trait MessageStore: Send + Sync {
         principal_id: PrincipalId,
     ) -> Result<Vec<Channel>>;
     async fn add_member(&self, channel_id: ChannelId, principal_id: PrincipalId) -> Result<()>;
+    /// Existing 1:1 DM between two principals in a workspace (exactly those two members).
+    async fn find_direct_channel(
+        &self,
+        workspace_id: WorkspaceId,
+        a: PrincipalId,
+        b: PrincipalId,
+    ) -> Result<Option<Channel>>;
     async fn remove_member(&self, channel_id: ChannelId, principal_id: PrincipalId) -> Result<()>;
     async fn is_member(&self, channel_id: ChannelId, principal_id: PrincipalId) -> Result<bool>;
 
@@ -233,6 +240,45 @@ impl MessageStore for PostgresMessageStore {
         .await
         .map_err(|e| MessagingError::Other(e.into()))?;
         Ok(())
+    }
+
+
+    async fn find_direct_channel(
+        &self,
+        workspace_id: WorkspaceId,
+        a: PrincipalId,
+        b: PrincipalId,
+    ) -> Result<Option<Channel>> {
+        let row = sqlx::query_as::<_, ChannelRow>(
+            r#"
+            SELECT c.id, c.workspace_id, c.kind, c.name, c.topic, c.is_archived,
+                   c.created_by, c.created_at, c.updated_at
+            FROM channels c
+            WHERE c.workspace_id = $1
+              AND c.kind = 'direct'
+              AND c.is_archived = FALSE
+              AND EXISTS (
+                    SELECT 1 FROM channel_members m
+                    WHERE m.channel_id = c.id AND m.principal_id = $2
+              )
+              AND EXISTS (
+                    SELECT 1 FROM channel_members m
+                    WHERE m.channel_id = c.id AND m.principal_id = $3
+              )
+              AND (
+                    SELECT COUNT(*) FROM channel_members m WHERE m.channel_id = c.id
+              ) = 2
+            ORDER BY c.created_at ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id.as_uuid())
+        .bind(a.as_uuid())
+        .bind(b.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| MessagingError::Other(e.into()))?;
+        Ok(row.map(Into::into))
     }
 
     async fn remove_member(&self, channel_id: ChannelId, principal_id: PrincipalId) -> Result<()> {

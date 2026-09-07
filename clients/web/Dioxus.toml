@@ -1,9 +1,0 @@
-[application]
-name = "tt-web"
-default_platform = "web"
-
-[web.app]
-title = "Turing Tarpit"
-
-[web.watcher]
-reload_html = true

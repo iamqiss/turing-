@@ -504,10 +504,17 @@ async fn get_sso(
         Ok(s) => Json(serde_json::json!({
             "enabled": s.enabled,
             "provider": s.provider,
+            "protocol": s.protocol,
             "issuer_url": s.issuer_url,
             "client_id": s.client_id,
             "client_secret_set": s.client_secret_set,
             "domains": s.domains,
+            "enforce_sso": s.enforce_sso,
+            "jit_provisioning": s.jit_provisioning,
+            "saml_entity_id": s.saml_entity_id,
+            "saml_sso_url": s.saml_sso_url,
+            "saml_sp_entity_id": s.saml_sp_entity_id,
+            "saml_idp_x509_set": s.saml_idp_x509_set,
         }))
         .into_response(),
         Err(e) => map_err(e),
@@ -530,6 +537,20 @@ async fn put_sso(
     };
     if let Err(e) = state.orgs.require_admin(org.id, ctx.principal_id()).await {
         return map_err(e);
+    }
+    // SSO Wall — turning SSO on requires Business/Enterprise
+    if body.enabled {
+        if let Err(e) = state.billing.assert_sso_entitled(org.id).await {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                Json(serde_json::json!({
+                    "error": e.to_string(),
+                    "code": "sso_wall",
+                    "upgrade_plans": ["business", "enterprise"],
+                })),
+            )
+                .into_response();
+        }
     }
     match state
         .orgs

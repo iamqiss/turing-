@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use tt_auth::{
-    AuthContext, AuthError, CeremonyId, PrincipalResolver, WebauthnService, AgentTokenService,
-    SessionService,
+    AuthContext, AuthError, CeremonyId, PassphraseService, PrincipalResolver, WebauthnService,
+    AgentTokenService, SessionService,
 };
 use tt_core::domain::PrincipalKind;
 use tonic::{Request, Response, Status};
@@ -21,6 +21,7 @@ pub struct AuthServiceImpl {
     pub sessions: Arc<SessionService>,
     pub agent_tokens: Arc<AgentTokenService>,
     pub resolver: Arc<PrincipalResolver>,
+    pub passphrases: Arc<PassphraseService>,
 }
 
 impl AuthServiceImpl {
@@ -29,12 +30,14 @@ impl AuthServiceImpl {
         sessions: Arc<SessionService>,
         agent_tokens: Arc<AgentTokenService>,
         resolver: Arc<PrincipalResolver>,
+        passphrases: Arc<PassphraseService>,
     ) -> Self {
         Self {
             webauthn,
             sessions,
             agent_tokens,
             resolver,
+            passphrases,
         }
     }
 }
@@ -263,5 +266,59 @@ impl AuthService for AuthServiceImpl {
             .map_err(map_auth_err)?;
 
         Ok(Response::new(RevokeAgentTokenResponse {}))
+    }
+
+    async fn register_with_passphrase(
+        &self,
+        request: Request<RegisterWithPassphraseRequest>,
+    ) -> Result<Response<RegisterWithPassphraseResponse>, Status> {
+        let req = request.into_inner();
+        let email = if req.email.is_empty() {
+            None
+        } else {
+            Some(req.email.as_str())
+        };
+        let (p, token) = self
+            .passphrases
+            .register(&req.handle, &req.display_name, email, &req.passphrase)
+            .await
+            .map_err(map_auth_err)?;
+        Ok(Response::new(RegisterWithPassphraseResponse {
+            principal_id: Some(Id {
+                value: p.id.to_string(),
+            }),
+            session_token: token,
+        }))
+    }
+
+    async fn login_with_passphrase(
+        &self,
+        request: Request<LoginWithPassphraseRequest>,
+    ) -> Result<Response<LoginWithPassphraseResponse>, Status> {
+        let req = request.into_inner();
+        let (p, token) = self
+            .passphrases
+            .login(&req.handle, &req.passphrase)
+            .await
+            .map_err(map_auth_err)?;
+        Ok(Response::new(LoginWithPassphraseResponse {
+            principal_id: Some(Id {
+                value: p.id.to_string(),
+            }),
+            session_token: token,
+        }))
+    }
+
+    async fn set_passphrase(
+        &self,
+        request: Request<SetPassphraseRequest>,
+    ) -> Result<Response<SetPassphraseResponse>, Status> {
+        let ctx = require_auth(&self.resolver, request.metadata()).await?;
+        let req = request.into_inner();
+        self.passphrases
+            .set_passphrase(ctx.principal_id(), &req.passphrase)
+            .await
+            .map_err(map_auth_err)?;
+        Ok(Response::new(SetPassphraseResponse {}))
     }
 }

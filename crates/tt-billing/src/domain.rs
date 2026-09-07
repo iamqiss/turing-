@@ -214,3 +214,12 @@ mod tests {
         assert_eq!(ManagedKind::parse("greptimedb"), Some(ManagedKind::TuringChronos));
     }
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SsoEntitlement {
+    pub plan_id: crate::catalog::PlanId,
+    pub sso_allowed: bool,
+    pub scim_allowed: bool,
+    pub sso_enforcement_allowed: bool,
+}

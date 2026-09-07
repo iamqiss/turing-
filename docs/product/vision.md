@@ -10,7 +10,7 @@ Humans and agents (Pearl) share channels, git, issues, compute, and audit. Secre
 2. **Transparency** — activity blend over vanity heatmaps  
 3. **Agent-native** — same permissions and trails; dangerous actions gated  
 4. **Self-hosted sovereignty** — Postgres + Redis + your object store + `tt-kms` on your bare metal  
-5. **Backend-first** — solid control plane before Dioxus UI polish  
+5. **Backend-first** — solid control plane; UI is a separate CMP app  
 
 ## Name
 

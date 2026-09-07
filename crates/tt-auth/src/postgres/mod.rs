@@ -307,6 +307,40 @@ impl AuthStore for PostgresAuthStore {
         Ok(())
     }
 
+
+    async fn set_passphrase_hash(&self, principal_id: PrincipalId, passphrase_hash: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO principal_passphrases (principal_id, passphrase_hash, created_at, updated_at)
+            VALUES ($1, $2, NOW(), NOW())
+            ON CONFLICT (principal_id) DO UPDATE
+            SET passphrase_hash = EXCLUDED.passphrase_hash,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(principal_id.as_uuid())
+        .bind(passphrase_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(())
+    }
+
+    async fn get_passphrase_hash(&self, principal_id: PrincipalId) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            r#"
+            SELECT passphrase_hash
+            FROM principal_passphrases
+            WHERE principal_id = $1
+            "#,
+        )
+        .bind(principal_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx)?;
+        Ok(row.map(|r| r.0))
+    }
+
     // -----------------------------------------------------------------------
     // Agent tokens
     // -----------------------------------------------------------------------

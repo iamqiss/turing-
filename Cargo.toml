@@ -19,7 +19,7 @@ members = [
     "crates/tt-notifications",
     "crates/tt-api",
     "crates/tt-server",
-    "clients/tt-ui",
+    "clients/tt-tui",
 ]
 
 [workspace.package]
@@ -34,6 +34,7 @@ publish = false
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
+sha1 = "0.10"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -62,6 +63,8 @@ prost-types = "0.13"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "danger-credential-internals"] }
 pasetors = { version = "0.7", features = ["std", "v4", "paserk"] }
 argon2 = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+subtle = "2"
 
 # IDs & time
 uuid = { version = "1", features = ["v7", "serde"] }
@@ -79,8 +82,15 @@ axum = { version = "0.7", features = ["multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 reqwest = { version = "0.12", features = ["json"] }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+flate2 = "1"
+openssl = "0.10"
 bytes = "1"
 http = "1"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
 
 # Validation
 validator = { version = "0.19", features = ["derive"] }

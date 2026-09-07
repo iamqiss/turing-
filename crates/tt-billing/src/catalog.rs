@@ -33,6 +33,21 @@ impl PlanId {
         }
     }
 
+    /// SSO wall: Business+ (OIDC/SAML). Free/Team stay passphrase/passkey.
+    pub fn includes_sso(self) -> bool {
+        matches!(self, Self::Business | Self::Enterprise)
+    }
+
+    /// SCIM / directory sync — Enterprise only.
+    pub fn includes_scim(self) -> bool {
+        matches!(self, Self::Enterprise)
+    }
+
+    /// Enforce SSO for domain members (IdP-required login).
+    pub fn includes_sso_enforcement(self) -> bool {
+        matches!(self, Self::Business | Self::Enterprise)
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "free" => Some(Self::Free),

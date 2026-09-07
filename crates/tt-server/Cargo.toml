@@ -60,3 +60,9 @@ tt-secrets = { workspace = true }
 
 tt-billing = { workspace = true }
 tt-pipelines = { workspace = true }
+reqwest = { workspace = true }
+base64 = "0.22"
+jsonwebtoken = { workspace = true }
+flate2 = { workspace = true }
+openssl = { workspace = true }
+sha1 = { workspace = true }

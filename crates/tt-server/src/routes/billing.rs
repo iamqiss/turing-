@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/billing/stripe/webhook", post(stripe_webhook))
         .route("/api/billing/catalog", get(catalog))
+        .route("/api/orgs/:slug/billing/sso-entitlement", get(sso_entitlement))
         .route("/api/orgs/:slug/billing/account", get(org_billing))
         .route("/api/orgs/:slug/billing/invoice-preview", get(invoice_preview))
         .route("/api/orgs/:slug/billing/usage", post(record_usage))
@@ -410,5 +411,34 @@ async fn mark_paid(
     {
         Ok(()) => Json(serde_json::json!({ "paid": true, "period": body.period })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+
+async fn sso_entitlement(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    use tt_auth::extract_bearer;
+    let token = match headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_bearer)
+    {
+        Some(t) => t,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    if state.principal_resolver.resolve_bearer(token).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let org = match state.orgs.get_by_slug(&slug).await {
+        Ok(o) => o,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    match state.billing.sso_entitlement(org.id).await {
+        Ok(e) => Json(e).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }

@@ -1,5 +1,9 @@
 //! HTTP routes.
 
+mod auth;
+mod sso;
+mod saml_dsig;
+mod jwks_cache;
 mod repos;
 mod workspaces;
 mod dev;
@@ -67,6 +71,8 @@ pub fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(media::router())
         .merge(secrets::router())
+        .merge(auth::router())
+        .merge(sso::router())
         .merge(dev::router())
         .with_state(state)
         .merge(messaging_http_router(msg_state))

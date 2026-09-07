@@ -31,3 +31,5 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 redis = { workspace = true }
+ed25519-dalek = { workspace = true }
+subtle = { workspace = true }

@@ -2,8 +2,8 @@
 
 > **Ironic name, serious product.** A self-hostable, AI-native Developer OS: code hosting, collaboration, compute, secrets, media, and lifecycle transparency — modular Rust monolith, proprietary, backend-first.
 
-**Last updated:** 2026-09-01  
-**Status:** Control plane solid through media + Scarlet Letter + in-house KMS; Dioxus clients still ahead.
+**Last updated:** 2026-09-03  
+**Status:** Control plane solid through media, Scarlet Letter, in-house KMS, Turing Tasks, Rooms, billing, compute lifecycle. **UI clients are out-of-tree** (Compose Multiplatform); this repo is backend-only.
 
 ---
 
@@ -21,9 +21,9 @@ Turing Tarpit covers the **full developer lifecycle** so humans *and* peer agent
 
 **Not** a Nostr/fediverse-style product. Centralized, coherent, low-level Rust control plane with separation of concerns that *mimics* microservices inside one deployable.
 
-**Clients (planned):** Dioxus → desktop, web, mobile over gRPC / gRPC-Web.
+**Clients:** maintained separately (Compose Multiplatform). Transport: native **gRPC** (mobile/desktop) + **gRPC-Web** (web) for Auth/Messaging; REST for workspaces/repos/issues until those services move to gRPC.
 
-**Aesthetic:** ivory `#fefce5`, mint `#c4ebcc`, grey `#707070` — custom fonts and SVG icons.
+**Aesthetic (product):** primary accent `#ff3c00` on pitch black; light content surfaces. Legacy ivory/mint/grey remain secondary.
 
 ---
 
@@ -212,7 +212,7 @@ tt-common          shared utilities
 ## 6. Runtime topology (production sketch)
 
 ```
-                  ┌──────────── Dioxus clients ────────────┐
+                  ┌──────────── External clients (CMP) ────────────┐
                   │  desktop · web · mobile (gRPC-Web)     │
                   └──────────────────┬─────────────────────┘
                                      │
@@ -275,7 +275,7 @@ See [runbooks/termux-lab.md](../runbooks/termux-lab.md).
 
 ## 9. Roadmap (explicitly not done)
 
-- Dioxus clients (desktop / web / mobile)
+- Out-of-tree CMP clients (not in this Cargo workspace)
 - **Rooms** (video) + Roomies; richer channel media UX
 - Apache **Iggy** fanout when Redis pub/sub is the bottleneck
 - Hardened org **RBAC** + strict human approval for agentic dangerous actions

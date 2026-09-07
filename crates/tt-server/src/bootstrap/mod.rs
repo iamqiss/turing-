@@ -6,6 +6,7 @@ use std::sync::Arc;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{info, warn};
 use tt_auth::{
+    BreakGlassService, PassphraseService,
     AgentTokenService, CeremonyStore, InMemoryCeremonyStore, PostgresAuthStore, PrincipalResolver,
     RedisCeremonyStore, SessionService, WebauthnService,
 };
@@ -70,6 +71,30 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         auth_store.clone(),
         config.agent_token_ttl_days,
     ));
+
+    let passphrases = Arc::new(PassphraseService::new(
+        auth_store.clone(),
+        sessions.clone(),
+    ));
+
+    let break_glass = Arc::new(BreakGlassService::new(
+        db.clone(),
+        auth_store.clone(),
+        sessions.clone(),
+    ));
+
+    {
+        let bg = break_glass.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Err(e) = bg.tick_time_locks().await {
+                    tracing::warn!(error = %e, "break_glass tick_time_locks failed");
+                }
+            }
+        });
+    }
 
     // --- Ceremony store (Redis, fallback in-memory) ---
     let ceremonies: Arc<dyn CeremonyStore> = match RedisCeremonyStore::new(&config.redis_url).await
@@ -352,6 +377,8 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         sessions,
         agent_tokens,
         webauthn,
+        passphrases,
+        break_glass,
         principal_resolver,
         repos,
         pull_requests,

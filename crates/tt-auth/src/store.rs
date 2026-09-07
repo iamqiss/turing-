@@ -63,6 +63,10 @@ pub trait AuthStore: Send + Sync {
     async fn revoke_session(&self, id: SessionId) -> Result<()>;
     async fn revoke_all_sessions(&self, principal_id: PrincipalId) -> Result<()>;
 
+    // --- Passphrases (optional human factor) ---
+    async fn set_passphrase_hash(&self, principal_id: PrincipalId, passphrase_hash: &str) -> Result<()>;
+    async fn get_passphrase_hash(&self, principal_id: PrincipalId) -> Result<Option<String>>;
+
     // --- Agent tokens ---
     async fn create_agent_token(&self, token: &StoredAgentToken) -> Result<()>;
     async fn get_agent_token_by_hash(&self, token_hash: &str) -> Result<Option<StoredAgentToken>>;

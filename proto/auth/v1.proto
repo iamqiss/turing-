@@ -20,6 +20,11 @@ service AuthService {
   // Agent tokens
   rpc CreateAgentToken(CreateAgentTokenRequest) returns (CreateAgentTokenResponse);
   rpc RevokeAgentToken(RevokeAgentTokenRequest) returns (RevokeAgentTokenResponse);
+
+  // User-chosen passphrase (CLI + clients; optional alongside WebAuthn)
+  rpc RegisterWithPassphrase(RegisterWithPassphraseRequest) returns (RegisterWithPassphraseResponse);
+  rpc LoginWithPassphrase(LoginWithPassphraseRequest) returns (LoginWithPassphraseResponse);
+  rpc SetPassphrase(SetPassphraseRequest) returns (SetPassphraseResponse);
 }
 
 message BeginRegistrationRequest {
@@ -97,3 +102,31 @@ message Principal {
   optional string email = 6;
   optional common.v1.Id owner_id = 7;
 }
+
+message RegisterWithPassphraseRequest {
+  string display_name = 1;
+  string handle = 2;
+  string email = 3;       // optional
+  string passphrase = 4;  // user-chosen; min 12 chars
+}
+
+message RegisterWithPassphraseResponse {
+  common.v1.Id principal_id = 1;
+  string session_token = 2;
+}
+
+message LoginWithPassphraseRequest {
+  string handle = 1;
+  string passphrase = 2;
+}
+
+message LoginWithPassphraseResponse {
+  common.v1.Id principal_id = 1;
+  string session_token = 2;
+}
+
+message SetPassphraseRequest {
+  string passphrase = 1;
+}
+
+message SetPassphraseResponse {}

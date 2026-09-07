@@ -3,7 +3,7 @@
 Turing Tarpit is a **modular monolith**: one primary binary (`tt-server`) with crates that own clear domains. Swap adapters (object store, KMS provider, realtime backend) without rewriting product logic.
 
 ```
-Clients (Dioxus) ──gRPC-Web / HTTP──► tt-server
+Clients (CMP / any) ──gRPC · gRPC-Web · HTTP──► tt-server
                                          │
             ┌────────────────────────────┼────────────────────────────┐
             ▼              ▼             ▼              ▼             ▼

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 use tt_auth::{
-    AgentTokenService, AuthStore, PrincipalResolver, SessionService, WebauthnService,
+    AgentTokenService, AuthStore, BreakGlassService, PassphraseService, PrincipalResolver, SessionService,
+    WebauthnService,
 };
 use tt_config::Config;
 use tt_git::{IssueService, PullRequestService, RepoService, ReviewService};
@@ -26,6 +27,8 @@ pub struct AppState {
     pub sessions: Arc<SessionService>,
     pub agent_tokens: Arc<AgentTokenService>,
     pub webauthn: Arc<WebauthnService>,
+    pub passphrases: Arc<PassphraseService>,
+    pub break_glass: Arc<BreakGlassService>,
     pub principal_resolver: Arc<PrincipalResolver>,
     pub repos: Arc<RepoService>,
     pub pull_requests: Arc<PullRequestService>,

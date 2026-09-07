@@ -118,7 +118,7 @@ impl WorkspaceStore for PostgresWorkspaceStore {
 
     async fn get(&self, id: WorkspaceId) -> Result<Option<Workspace>> {
         let row = sqlx::query_as::<_, WsRow>(
-            r#"SELECT id, name, slug, description, owner_id, created_at, updated_at
+            r#"SELECT id, org_id, name, slug, description, owner_id, created_at, updated_at
                FROM workspaces WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -130,7 +130,7 @@ impl WorkspaceStore for PostgresWorkspaceStore {
 
     async fn get_by_slug(&self, slug: &str) -> Result<Option<Workspace>> {
         let row = sqlx::query_as::<_, WsRow>(
-            r#"SELECT id, name, slug, description, owner_id, created_at, updated_at
+            r#"SELECT id, org_id, name, slug, description, owner_id, created_at, updated_at
                FROM workspaces WHERE lower(slug) = lower($1)"#,
         )
         .bind(slug)
@@ -143,7 +143,7 @@ impl WorkspaceStore for PostgresWorkspaceStore {
     async fn list_for_principal(&self, principal_id: PrincipalId) -> Result<Vec<Workspace>> {
         let rows = sqlx::query_as::<_, WsRow>(
             r#"
-            SELECT w.id, w.name, w.slug, w.description, w.owner_id, w.created_at, w.updated_at
+            SELECT w.id, w.org_id, w.name, w.slug, w.description, w.owner_id, w.created_at, w.updated_at
             FROM workspaces w
             INNER JOIN workspace_members m ON m.workspace_id = w.id
             WHERE m.principal_id = $1

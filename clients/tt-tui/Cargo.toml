@@ -1,0 +1,27 @@
+[package]
+name = "tt-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Turing Tarpit terminal UI (Ratatui)"
+
+[[bin]]
+name = "tt"
+path = "src/main.rs"
+
+[dependencies]
+tt-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+chrono = { workspace = true }
+dirs = "5"
+toml = { workspace = true }

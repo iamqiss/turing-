@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::catalog::{Catalog, Meter, PlanId};
 use crate::domain::{
     BillingAccount, ManagedKind, ManagedResource, OrgInvoicePreview, PlatformFinanceSnapshot,
-    UsageEvent, UsageMonthly,
+    SsoEntitlement, UsageEvent, UsageMonthly,
 };
 use crate::error::{BillingError, Result};
 use crate::store::BillingStore;
@@ -58,6 +58,50 @@ impl BillingService {
                 "organization billing status blocks this action (suspended/canceled/unpaid)".into(),
             ))
         }
+    }
+
+    /// SSO Wall — enabling or using org SSO requires Business or Enterprise.
+    pub async fn assert_sso_entitled(&self, org_id: OrgId) -> Result<()> {
+        self.assert_org_active(org_id).await?;
+        let plan = match self.store.get_account(org_id).await? {
+            Some(a) => a.plan_id,
+            None => PlanId::Free,
+        };
+        if plan.includes_sso() {
+            Ok(())
+        } else {
+            Err(BillingError::Forbidden(
+                "SSO is available on Business and Enterprise plans (SSO wall)".into(),
+            ))
+        }
+    }
+
+    pub async fn assert_scim_entitled(&self, org_id: OrgId) -> Result<()> {
+        self.assert_org_active(org_id).await?;
+        let plan = match self.store.get_account(org_id).await? {
+            Some(a) => a.plan_id,
+            None => PlanId::Free,
+        };
+        if plan.includes_scim() {
+            Ok(())
+        } else {
+            Err(BillingError::Forbidden(
+                "SCIM directory sync is available on the Enterprise plan".into(),
+            ))
+        }
+    }
+
+    pub async fn sso_entitlement(&self, org_id: OrgId) -> Result<SsoEntitlement> {
+        let plan = match self.store.get_account(org_id).await? {
+            Some(a) => a.plan_id,
+            None => PlanId::Free,
+        };
+        Ok(SsoEntitlement {
+            plan_id: plan,
+            sso_allowed: plan.includes_sso(),
+            scim_allowed: plan.includes_scim(),
+            sso_enforcement_allowed: plan.includes_sso_enforcement(),
+        })
     }
 
     pub async fn ensure_account(

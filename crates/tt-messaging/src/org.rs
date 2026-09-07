@@ -794,11 +794,22 @@ pub struct OrgSsoConfig {
     pub org_id: OrgId,
     pub enabled: bool,
     pub provider: String,
+    pub protocol: String,
     pub issuer_url: Option<String>,
     pub client_id: Option<String>,
     /// Never returned to clients in full — write-only
     pub client_secret_set: bool,
     pub domains: Vec<String>,
+    pub enforce_sso: bool,
+    pub jit_provisioning: bool,
+    pub saml_entity_id: Option<String>,
+    pub saml_sso_url: Option<String>,
+    pub saml_slo_url: Option<String>,
+    pub saml_idp_x509_set: bool,
+    pub saml_sp_entity_id: Option<String>,
+    /// Org slug for login redirects (filled by discovery when joined)
+    #[serde(default)]
+    pub org_slug: Option<String>,
 }
 
 impl OrgService {
@@ -869,37 +880,101 @@ impl OrgService {
     }
 
     pub async fn get_sso(&self, org_id: OrgId) -> Result<OrgSsoConfig> {
-        let row: Option<(bool, String, Option<String>, Option<String>, Option<String>, Vec<String>)> =
-            sqlx::query_as(
-                r#"
-                SELECT enabled, provider, issuer_url, client_id, client_secret, domains
-                FROM org_sso_configs WHERE org_id = $1
-                "#,
-            )
-            .bind(org_id.as_uuid())
-            .fetch_optional(self.pool())
-            .await
-            .map_err(|e| MessagingError::Other(e.into()))?;
+        let row = sqlx::query_as::<_, SsoConfigRow>(
+            r#"
+            SELECT enabled, provider,
+                   COALESCE(protocol, 'oidc') AS protocol,
+                   issuer_url, client_id, client_secret, domains,
+                   COALESCE(enforce_sso, false) AS enforce_sso,
+                   COALESCE(jit_provisioning, true) AS jit_provisioning,
+                   saml_entity_id, saml_sso_url, saml_slo_url, saml_idp_x509, saml_sp_entity_id
+            FROM org_sso_configs WHERE org_id = $1
+            "#,
+        )
+        .bind(org_id.as_uuid())
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| MessagingError::Other(e.into()))?;
         Ok(match row {
-            Some((enabled, provider, issuer_url, client_id, secret, domains)) => OrgSsoConfig {
-                org_id,
-                enabled,
-                provider,
-                issuer_url,
-                client_id,
-                client_secret_set: secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
-                domains,
-            },
+            Some(r) => r.into_config(org_id),
             None => OrgSsoConfig {
                 org_id,
                 enabled: false,
                 provider: "oidc".into(),
+                protocol: "oidc".into(),
                 issuer_url: None,
                 client_id: None,
                 client_secret_set: false,
                 domains: vec![],
+                enforce_sso: false,
+                jit_provisioning: true,
+                saml_entity_id: None,
+                saml_sso_url: None,
+                saml_slo_url: None,
+                saml_idp_x509_set: false,
+                saml_sp_entity_id: None,
+                org_slug: None,
             },
         })
+    }
+
+    /// Domain discovery: map email or bare domain → enabled SSO org (if any).
+    pub async fn discover_sso_by_domain(&self, email_or_domain: &str) -> Result<Option<(String, OrgSsoConfig)>> {
+        let domain = normalize_email_domain(email_or_domain)?;
+        let row = sqlx::query_as::<_, DiscoverRow>(
+            r#"
+            SELECT o.id AS org_id, o.slug AS org_slug,
+                   s.enabled, s.provider, COALESCE(s.protocol, 'oidc') AS protocol,
+                   s.issuer_url, s.client_id, s.client_secret, s.domains,
+                   COALESCE(s.enforce_sso, false) AS enforce_sso,
+                   COALESCE(s.jit_provisioning, true) AS jit_provisioning,
+                   s.saml_entity_id, s.saml_sso_url, s.saml_slo_url, s.saml_idp_x509, s.saml_sp_entity_id
+            FROM org_sso_configs s
+            JOIN orgs o ON o.id = s.org_id
+            WHERE s.enabled = TRUE
+              AND EXISTS (
+                  SELECT 1 FROM unnest(s.domains) AS d(domain)
+                  WHERE lower(d.domain) = $1
+              )
+            LIMIT 1
+            "#,
+        )
+        .bind(&domain)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| MessagingError::Other(e.into()))?;
+
+        Ok(row.map(|r| {
+            let slug = r.org_slug.clone();
+            let mut cfg = r.into_config();
+            cfg.org_slug = Some(slug.clone());
+            (slug, cfg)
+        }))
+    }
+
+    /// Load client_secret for token exchange (server-side only).
+    pub async fn get_sso_saml_idp_x509(&self, org_id: OrgId) -> Result<Option<String>> {
+        let cert: Option<String> = sqlx::query_scalar(
+            "SELECT NULLIF(saml_idp_x509, '') FROM org_sso_configs WHERE org_id = $1",
+        )
+        .bind(org_id.as_uuid())
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| MessagingError::Other(e.into()))?
+        .flatten();
+        Ok(cert)
+    }
+
+    pub async fn get_sso_client_secret(&self, org_id: OrgId) -> Result<Option<String>> {
+        let secret: Option<String> = sqlx::query_scalar(
+            "SELECT NULLIF(client_secret, '') FROM org_sso_configs WHERE org_id = $1",
+        )
+        .bind(org_id.as_uuid())
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| MessagingError::Other(e.into()))?
+        .flatten();
+        Ok(secret)
     }
 
     pub async fn upsert_sso(
@@ -1001,5 +1076,113 @@ impl OrgService {
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+}
+
+
+fn normalize_email_domain(email_or_domain: &str) -> Result<String> {
+    let s = email_or_domain.trim().to_lowercase();
+    if s.is_empty() {
+        return Err(MessagingError::InvalidArgument("email or domain required".into()));
+    }
+    let domain = if let Some(idx) = s.rfind('@') {
+        s[idx + 1..].to_string()
+    } else {
+        s
+    };
+    if domain.is_empty() || domain.contains(' ') || !domain.contains('.') {
+        return Err(MessagingError::InvalidArgument("invalid email domain".into()));
+    }
+    Ok(domain)
+}
+
+#[derive(sqlx::FromRow)]
+struct SsoConfigRow {
+    enabled: bool,
+    provider: String,
+    protocol: String,
+    issuer_url: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    domains: Vec<String>,
+    enforce_sso: bool,
+    jit_provisioning: bool,
+    saml_entity_id: Option<String>,
+    saml_sso_url: Option<String>,
+    saml_slo_url: Option<String>,
+    saml_idp_x509: Option<String>,
+    saml_sp_entity_id: Option<String>,
+}
+
+impl SsoConfigRow {
+    fn into_config(self, org_id: OrgId) -> OrgSsoConfig {
+        OrgSsoConfig {
+            org_id,
+            enabled: self.enabled,
+            provider: self.provider,
+            protocol: self.protocol,
+            issuer_url: self.issuer_url,
+            client_id: self.client_id,
+            client_secret_set: self
+                .client_secret
+                .as_ref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            domains: self.domains,
+            enforce_sso: self.enforce_sso,
+            jit_provisioning: self.jit_provisioning,
+            saml_entity_id: self.saml_entity_id,
+            saml_sso_url: self.saml_sso_url,
+            saml_slo_url: self.saml_slo_url,
+            saml_idp_x509_set: self
+                .saml_idp_x509
+                .as_ref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            saml_sp_entity_id: self.saml_sp_entity_id,
+            org_slug: None,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct DiscoverRow {
+    org_id: uuid::Uuid,
+    org_slug: String,
+    enabled: bool,
+    provider: String,
+    protocol: String,
+    issuer_url: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    domains: Vec<String>,
+    enforce_sso: bool,
+    jit_provisioning: bool,
+    saml_entity_id: Option<String>,
+    saml_sso_url: Option<String>,
+    saml_slo_url: Option<String>,
+    saml_idp_x509: Option<String>,
+    saml_sp_entity_id: Option<String>,
+}
+
+impl DiscoverRow {
+    fn into_config(self) -> OrgSsoConfig {
+        SsoConfigRow {
+            enabled: self.enabled,
+            provider: self.provider,
+            protocol: self.protocol,
+            issuer_url: self.issuer_url,
+            client_id: self.client_id,
+            client_secret: self.client_secret,
+            domains: self.domains,
+            enforce_sso: self.enforce_sso,
+            jit_provisioning: self.jit_provisioning,
+            saml_entity_id: self.saml_entity_id,
+            saml_sso_url: self.saml_sso_url,
+            saml_slo_url: self.saml_slo_url,
+            saml_idp_x509: self.saml_idp_x509,
+            saml_sp_entity_id: self.saml_sp_entity_id,
+        }
+        .into_config(OrgId::from_uuid(self.org_id))
     }
 }

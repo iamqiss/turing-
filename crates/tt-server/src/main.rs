@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         state.sessions.clone(),
         state.agent_tokens.clone(),
         state.principal_resolver.clone(),
+        state.passphrases.clone(),
     );
 
     let messaging_svc = MessagingServiceImpl::new(

@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 use tt_kms::{
-    generate_master_key, router, seal_master_key, unseal_master_key, AppState, KmsEngine,
+    generate_master_key, is_legacy_seal, router, seal_master_key, unseal_master_key,
+    write_sealed_file, AppState, KmsEngine,
 };
 
 #[tokio::main]
@@ -48,6 +49,25 @@ async fn main() -> anyhow::Result<()> {
     } else if sealed_path.exists() {
         let blob = tokio::fs::read(&sealed_path).await?;
         let master = unseal_master_key(&blob, &passphrase)?;
+        if is_legacy_seal(&blob) {
+            // v1 used one SHA-256 of the passphrase: upgrade to Argon2id in place.
+            let upgraded = seal_master_key(&master, &passphrase)?;
+            // never replace the only copy of the key with something unverified
+            if unseal_master_key(&upgraded, &passphrase)? != master {
+                anyhow::bail!("sealed-key upgrade self-check failed; file left unchanged");
+            }
+            let mut backup = sealed_path.as_os_str().to_owned();
+            backup.push(".v1.bak");
+            let backup = PathBuf::from(backup);
+            write_sealed_file(&backup, &blob)?;
+            write_sealed_file(&sealed_path, &upgraded)?;
+            warn!(
+                path = %sealed_path.display(),
+                backup = %backup.display(),
+                "upgraded sealed master key to Argon2id (v2); the .v1.bak copy is brute-forceable — \
+                 delete it once a restart has been confirmed"
+            );
+        }
         engine.unlock(&key_id, master).await?;
         info!(%key_id, path = %sealed_path.display(), "unsealed master key");
     } else {
@@ -57,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         }
         let master = generate_master_key();
         let sealed = seal_master_key(&master, &passphrase)?;
-        tokio::fs::write(&sealed_path, &sealed).await?;
+        write_sealed_file(&sealed_path, &sealed)?;
         engine.unlock(&key_id, master).await?;
         info!(%key_id, path = %sealed_path.display(), "generated + sealed new master key");
     }

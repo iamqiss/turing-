@@ -16,5 +16,7 @@ mod api;
 
 pub use engine::{KeyMeta, KmsEngine};
 pub use error::{KmsError, Result};
-pub use seal::{generate_master_key, seal_master_key, unseal_master_key};
+pub use seal::{
+    generate_master_key, is_legacy_seal, seal_master_key, unseal_master_key, write_sealed_file,
+};
 pub use api::{router, AppState};

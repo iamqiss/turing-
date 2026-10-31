@@ -225,18 +225,76 @@ fn b64_dec(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn sign_headers(secret: &str) -> Result<(String, String)> {
+/// String that is HMAC-signed for tt-kms. Binds method, path, body and moment:
+/// `tt-kms-v2\n{ts}\n{nonce}\n{METHOD}\n{path}\n{hex(sha256(body))}`
+///
+/// Must stay identical to `signing_input` in `crates/tt-kms/src/api.rs`; both
+/// crates assert the same golden vector.
+fn signing_input(ts: &str, nonce: &str, method: &str, path: &str, body: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "tt-kms-v2\n{ts}\n{nonce}\n{method}\n{path}\n{}",
+        hex::encode(Sha256::digest(body))
+    )
+}
+
+fn hmac_hex(secret: &str, input: &str) -> Result<String> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    type HmacSha256 = Hmac<Sha256>;
-    let ts = chrono::Utc::now().timestamp().to_string();
-    if secret.is_empty() {
-        return Ok((ts, String::new()));
-    }
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
         .map_err(|e| SecretsError::Crypto(e.to_string()))?;
-    mac.update(ts.as_bytes());
-    Ok((ts, hex::encode(mac.finalize().into_bytes())))
+    mac.update(input.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+struct KmsAuth {
+    ts: String,
+    nonce: String,
+    sig: String,
+}
+
+fn sign_request(secret: &str, method: &str, path: &str, body: &[u8]) -> Result<KmsAuth> {
+    let ts = chrono::Utc::now().timestamp().to_string();
+    let mut raw = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let nonce = hex::encode(raw);
+    let sig = hmac_hex(secret, &signing_input(&ts, &nonce, method, path, body))?;
+    Ok(KmsAuth { ts, nonce, sig })
+}
+
+impl TtKmsProvider {
+    /// POST a JSON body, signed when a shared secret is configured.
+    /// The signed bytes are exactly the bytes sent.
+    async fn post_signed<B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        what: &str,
+    ) -> Result<reqwest::Response> {
+        let bytes = serde_json::to_vec(body)
+            .map_err(|e| SecretsError::Crypto(format!("tt-kms {what} encode: {e}")))?;
+        let url = format!("{}{}", self.endpoint, path);
+        // sign the path the server will actually see (endpoint may carry a prefix)
+        let signed_path = reqwest::Url::parse(&url)
+            .map_err(|e| SecretsError::Crypto(format!("tt-kms endpoint: {e}")))?
+            .path()
+            .to_string();
+        let mut req = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json");
+        if !self.auth_secret.is_empty() {
+            let a = sign_request(&self.auth_secret, "POST", &signed_path, &bytes)?;
+            req = req
+                .header("x-tt-kms-timestamp", a.ts)
+                .header("x-tt-kms-nonce", a.nonce)
+                .header("x-tt-kms-signature", a.sig);
+        }
+        req.body(bytes)
+            .send()
+            .await
+            .map_err(|e| SecretsError::Crypto(format!("tt-kms {what} unreachable: {e}")))
+    }
 }
 
 #[async_trait]
@@ -249,20 +307,11 @@ impl KeyProvider for TtKmsProvider {
     }
 
     async fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>> {
-        let url = format!("{}/v1/wrap", self.endpoint);
         let body = TtWrapReq {
             key_id: Some(self.key_id.clone()),
             plaintext_b64: b64_enc(dek),
         };
-        let (ts, sig) = sign_headers(&self.auth_secret)?;
-        let mut req = self.client.post(&url).json(&body).header("x-tt-kms-timestamp", &ts);
-        if !sig.is_empty() {
-            req = req.header("x-tt-kms-signature", &sig);
-        }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| SecretsError::Crypto(format!("tt-kms wrap unreachable: {e}")))?;
+        let res = self.post_signed("/v1/wrap", &body, "wrap").await?;
         if !res.status().is_success() {
             let t = res.text().await.unwrap_or_default();
             return Err(SecretsError::Crypto(format!("tt-kms wrap: {t}")));
@@ -275,20 +324,11 @@ impl KeyProvider for TtKmsProvider {
     }
 
     async fn unwrap_dek(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let url = format!("{}/v1/unwrap", self.endpoint);
         let body = TtUnwrapReq {
             key_id: Some(self.key_id.clone()),
             ciphertext_b64: b64_enc(ciphertext),
         };
-        let (ts, sig) = sign_headers(&self.auth_secret)?;
-        let mut req = self.client.post(&url).json(&body).header("x-tt-kms-timestamp", &ts);
-        if !sig.is_empty() {
-            req = req.header("x-tt-kms-signature", &sig);
-        }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| SecretsError::Crypto(format!("tt-kms unwrap unreachable: {e}")))?;
+        let res = self.post_signed("/v1/unwrap", &body, "unwrap").await?;
         if !res.status().is_success() {
             let t = res.text().await.unwrap_or_default();
             return Err(SecretsError::Crypto(format!("tt-kms unwrap: {t}")));
@@ -606,6 +646,29 @@ pub fn unpack_wrapped(blob: &[u8]) -> Result<(String, String, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kms_signature_golden_vector_matches_tt_kms() {
+        // Keep identical to the vector in crates/tt-kms/src/api.rs.
+        let secret = "unit-test-secret-unit-test-secret-32";
+        let body = br#"{"key_id":"k1","ciphertext_b64":"AAAA"}"#;
+        let input = signing_input("1761800000", "0123456789abcdef", "POST", "/v1/unwrap", body);
+        assert_eq!(
+            hmac_hex(secret, &input).unwrap(),
+            "2c37d2438995e008f01b46c58f225849d8611314a20b0a9d388defbf235a7e60"
+        );
+    }
+
+    #[test]
+    fn sign_request_uses_fresh_nonce_and_binds_body() {
+        let a = sign_request("s".repeat(32).as_str(), "POST", "/v1/wrap", b"{}").unwrap();
+        let b = sign_request("s".repeat(32).as_str(), "POST", "/v1/wrap", b"{}").unwrap();
+        assert_ne!(a.nonce, b.nonce);
+        assert_eq!(a.nonce.len(), 32);
+        assert!(a.nonce.bytes().all(|c| c.is_ascii_alphanumeric()));
+        let c = sign_request("s".repeat(32).as_str(), "POST", "/v1/wrap", b"{ }").unwrap();
+        assert_ne!(a.sig, c.sig);
+    }
 
     #[tokio::test]
     async fn local_wrap_unwrap_roundtrip() {

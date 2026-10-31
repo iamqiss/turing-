@@ -25,6 +25,21 @@ async fn main() -> anyhow::Result<()> {
     );
     let passphrase = std::env::var("TT_KMS_UNSEAL").unwrap_or_default();
     let auth_secret = std::env::var("TT_KMS_AUTH_SECRET").unwrap_or_default();
+    let insecure_lab = std::env::var("TT_KMS_INSECURE_LAB").is_ok_and(|v| v == "1");
+
+    // Fail closed: wrap/unwrap hand out DEKs, so never serve them unauthenticated
+    // by accident.
+    if auth_secret.is_empty() {
+        if !insecure_lab {
+            anyhow::bail!(
+                "TT_KMS_AUTH_SECRET is empty: refusing to serve unauthenticated wrap/unwrap \
+                 (set TT_KMS_INSECURE_LAB=1 for a local lab only)"
+            );
+        }
+        warn!("TT_KMS_INSECURE_LAB=1: wrap/unwrap are UNAUTHENTICATED — lab use only");
+    } else if auth_secret.len() < 32 {
+        anyhow::bail!("TT_KMS_AUTH_SECRET must be at least 32 bytes");
+    }
 
     let engine = KmsEngine::new_locked();
 
@@ -47,10 +62,7 @@ async fn main() -> anyhow::Result<()> {
         info!(%key_id, path = %sealed_path.display(), "generated + sealed new master key");
     }
 
-    let state = AppState {
-        engine: engine.clone(),
-        auth_secret,
-    };
+    let state = AppState::new(engine.clone(), auth_secret);
     let app = router(state);
     let addr: SocketAddr = bind.parse()?;
     info!(%addr, "tt-kms listening (bind private NIC only on metal)");

@@ -94,6 +94,16 @@ pub struct Config {
     pub inference_api_key: String,
 }
 
+/// Deterministic key for throwaway labs. It is published in this source tree, so
+/// anything encrypted with it is readable by anyone. Only used when
+/// `TT_ALLOW_INSECURE_DEV_KEY=1`.
+pub const INSECURE_DEV_KEY: [u8; 32] = *b"turing-tarpit!!!-secrets-key!!!!";
+
+/// `TT_ALLOW_INSECURE_DEV_KEY=1` opts in to [`INSECURE_DEV_KEY`].
+pub fn insecure_dev_key_allowed() -> bool {
+    std::env::var("TT_ALLOW_INSECURE_DEV_KEY").is_ok_and(|v| v == "1")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -247,20 +257,31 @@ impl Config {
         Ok(config)
     }
 
-    /// Parse session key from hex. Returns None if empty (dev ephemeral key).
+    /// 32-byte secrets key from `TT_SECRETS_KEY` (falls back to `TT_SESSION_KEY`).
+    ///
+    /// With neither set this is an **error**, unless `TT_ALLOW_INSECURE_DEV_KEY=1`,
+    /// in which case the publicly known [`INSECURE_DEV_KEY`] is returned. Never
+    /// returns a guessable key silently.
     pub fn secrets_key_bytes(&self) -> anyhow::Result<[u8; 32]> {
+        self.secrets_key_bytes_with(insecure_dev_key_allowed())
+    }
+
+    /// Like [`Self::secrets_key_bytes`] with the dev-key opt-in passed explicitly.
+    pub fn secrets_key_bytes_with(&self, allow_insecure_dev_key: bool) -> anyhow::Result<[u8; 32]> {
         let s = if !self.secrets_key.trim().is_empty() {
             self.secrets_key.trim()
         } else {
             self.session_key.trim()
         };
         if s.is_empty() {
-            // Dev fallback — deterministic but insecure; set TT_SECRETS_KEY in prod
-            // Exactly 16 + 16 bytes for the [u8; 32] fallback (lab only)
-            let mut out = [0u8; 32];
-            out[..16].copy_from_slice(b"turing-tarpit!!!"); // 16
-            out[16..].copy_from_slice(b"-secrets-key!!!!"); // 16
-            return Ok(out);
+            if allow_insecure_dev_key {
+                return Ok(INSECURE_DEV_KEY);
+            }
+            anyhow::bail!(
+                "TT_SECRETS_KEY is not set. Generate one with `openssl rand -hex 32`. \
+                 For a throwaway lab only, set TT_ALLOW_INSECURE_DEV_KEY=1 to use a \
+                 publicly known key."
+            );
         }
         let bytes = hex::decode(s).map_err(|e| anyhow::anyhow!("secrets_key hex: {e}"))?;
         if bytes.len() != 32 {
@@ -310,5 +331,60 @@ impl Config {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(Some(arr))
+    }
+}
+
+#[cfg(test)]
+mod secrets_key_tests {
+    use super::*;
+
+    fn cfg(secrets: &str, session: &str) -> Config {
+        let mut c = Config::default();
+        c.secrets_key = secrets.into();
+        c.session_key = session.into();
+        c
+    }
+
+    const HEX_A: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn dev_key_constant_is_32_bytes_and_unchanged() {
+        // Existing lab databases were encrypted with exactly these bytes.
+        assert_eq!(&INSECURE_DEV_KEY[..16], b"turing-tarpit!!!");
+        assert_eq!(&INSECURE_DEV_KEY[16..], b"-secrets-key!!!!");
+    }
+
+    #[test]
+    fn empty_key_is_an_error_by_default() {
+        let err = cfg("", "").secrets_key_bytes_with(false).unwrap_err().to_string();
+        assert!(err.contains("TT_SECRETS_KEY"), "{err}");
+        let err = cfg("   ", "  ").secrets_key_bytes_with(false).unwrap_err().to_string();
+        assert!(err.contains("TT_SECRETS_KEY"), "{err}");
+    }
+
+    #[test]
+    fn dev_key_only_with_explicit_opt_in() {
+        assert_eq!(cfg("", "").secrets_key_bytes_with(true).unwrap(), INSECURE_DEV_KEY);
+    }
+
+    #[test]
+    fn explicit_key_wins_and_opt_in_does_not_override_it() {
+        let k = cfg(HEX_A, "").secrets_key_bytes_with(true).unwrap();
+        assert_eq!(k[0], 0x00);
+        assert_eq!(k[31], 0x1f);
+        assert_ne!(k, INSECURE_DEV_KEY);
+    }
+
+    #[test]
+    fn session_key_is_used_when_secrets_key_is_empty() {
+        let k = cfg("", HEX_A).secrets_key_bytes_with(false).unwrap();
+        assert_eq!(k[31], 0x1f);
+    }
+
+    #[test]
+    fn malformed_keys_are_errors_not_zero_keys() {
+        assert!(cfg("zz", "").secrets_key_bytes_with(true).is_err());
+        assert!(cfg("00ff", "").secrets_key_bytes_with(true).is_err());
+        assert!(cfg(&format!("{HEX_A}00"), "").secrets_key_bytes_with(true).is_err());
     }
 }

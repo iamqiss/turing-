@@ -152,6 +152,8 @@ Clients: native **gRPC** on mobile/desktop; **gRPC-Web** on web; REST for worksp
 export DATABASE_URL=postgres://turing:turing@127.0.0.1/turing_tarpit
 export REDIS_URL=redis://127.0.0.1/
 export TT_DEV_BOOTSTRAP=1
+export TT_SECRETS_KEY="$(openssl rand -hex 32)"   # required; boot fails without it
+# throwaway lab only, instead of the line above: export TT_ALLOW_INSECURE_DEV_KEY=1
 # optional: TT_REALTIME_BACKEND=iggy
 
 cargo run -p tt-server

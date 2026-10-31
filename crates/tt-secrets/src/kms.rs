@@ -15,7 +15,7 @@ use aes_gcm::{
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::{Result, SecretsError};
 
@@ -40,6 +40,9 @@ pub struct KmsConfig {
     /// HMAC shared secret with tt-kms (TT_KMS_AUTH_SECRET)
     pub token: String,
     pub region: String,
+    /// Allow the `local` provider to run with the publicly known dev KEK when
+    /// `local_key_hex` is empty. Lab only; default false.
+    pub allow_insecure_dev_key: bool,
 }
 
 impl Default for KmsConfig {
@@ -51,6 +54,7 @@ impl Default for KmsConfig {
             endpoint: "http://127.0.0.1:9797".into(),
             token: String::new(),
             region: String::new(),
+            allow_insecure_dev_key: false,
         }
     }
 }
@@ -72,8 +76,16 @@ pub fn build_provider(cfg: &KmsConfig) -> Result<std::sync::Arc<dyn KeyProvider>
             }))
         }
         "local" | "" => {
-            let key = parse_local_key(&cfg.local_key_hex)?;
-            info!(key_id = %cfg.key_id, "KMS provider: local (lab only — use tt-kms on metal)");
+            let key = parse_local_key(&cfg.local_key_hex, cfg.allow_insecure_dev_key)?;
+            if cfg.local_key_hex.trim().is_empty() {
+                warn!(
+                    key_id = %cfg.key_id,
+                    "KMS provider: local with the PUBLICLY KNOWN dev key (TT_ALLOW_INSECURE_DEV_KEY=1) — \
+                     secrets are readable by anyone with the database; lab only"
+                );
+            } else {
+                info!(key_id = %cfg.key_id, "KMS provider: local (lab only — use tt-kms on metal)");
+            }
             Ok(std::sync::Arc::new(LocalKeyProvider {
                 key,
                 key_id: if cfg.key_id.is_empty() {
@@ -102,10 +114,17 @@ pub fn build_provider(cfg: &KmsConfig) -> Result<std::sync::Arc<dyn KeyProvider>
         ))),
     }
 }
-fn parse_local_key(hex_or_empty: &str) -> Result<[u8; 32]> {
+fn parse_local_key(hex_or_empty: &str, allow_insecure_dev_key: bool) -> Result<[u8; 32]> {
     let s = hex_or_empty.trim();
     if s.is_empty() {
-        // Deterministic weak fallback for lab only — operators must set TT_SECRETS_KEY in prod
+        if !allow_insecure_dev_key {
+            return Err(SecretsError::Crypto(
+                "local KMS needs TT_SECRETS_KEY (64 hex chars; `openssl rand -hex 32`). \
+                 For a throwaway lab only, set TT_ALLOW_INSECURE_DEV_KEY=1"
+                    .into(),
+            ));
+        }
+        // Publicly known key: lab only, and only on explicit opt-in.
         let mut out = [0u8; 32];
         out[..16].copy_from_slice(b"tt-dev-only-kek!");
         out[16..].copy_from_slice(b"-secrets-key!!!!"); // 16
@@ -646,6 +665,52 @@ pub fn unpack_wrapped(blob: &[u8]) -> Result<(String, String, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_provider_refuses_to_start_without_a_key() {
+        let cfg = KmsConfig {
+            provider: "local".into(),
+            ..KmsConfig::default()
+        };
+        let err = build_provider(&cfg).err().expect("must fail").to_string();
+        assert!(err.contains("TT_SECRETS_KEY"), "{err}");
+        // blank/whitespace is the same as unset
+        let cfg = KmsConfig {
+            provider: "local".into(),
+            local_key_hex: "   ".into(),
+            ..KmsConfig::default()
+        };
+        assert!(build_provider(&cfg).is_err());
+        // empty provider string means "local" too
+        let cfg = KmsConfig {
+            provider: String::new(),
+            ..KmsConfig::default()
+        };
+        assert!(build_provider(&cfg).is_err());
+    }
+
+    #[test]
+    fn dev_key_requires_explicit_opt_in_and_is_the_documented_value() {
+        assert!(parse_local_key("", false).is_err());
+        let k = parse_local_key("", true).unwrap();
+        assert_eq!(&k[..16], b"tt-dev-only-kek!");
+        let cfg = KmsConfig {
+            provider: "local".into(),
+            allow_insecure_dev_key: true,
+            ..KmsConfig::default()
+        };
+        assert!(build_provider(&cfg).is_ok());
+    }
+
+    #[test]
+    fn explicit_local_key_is_validated() {
+        let ok = "11".repeat(32);
+        assert_eq!(parse_local_key(&ok, false).unwrap(), [0x11u8; 32]);
+        assert_eq!(parse_local_key(&format!("  {ok}\n"), false).unwrap(), [0x11u8; 32]);
+        assert!(parse_local_key("11", false).is_err());
+        assert!(parse_local_key(&"11".repeat(33), false).is_err());
+        assert!(parse_local_key(&"zz".repeat(32), true).is_err());
+    }
 
     #[test]
     fn kms_signature_golden_vector_matches_tt_kms() {

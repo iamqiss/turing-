@@ -250,9 +250,14 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let compute_store = Arc::new(PostgresComputeStore::new(db.clone()));
     let ip_alloc = Arc::new(PostgresIpAllocator::new(db.clone()));
     let public_base = config.webauthn_rp_origin.clone();
+    // Fail closed: a missing or malformed key must stop boot, never degrade to a
+    // guessable one (this key protects compute deploy tokens).
     let secrets_key = config
         .secrets_key_bytes()
-        .unwrap_or_else(|_| [0u8; 32]);
+        .map_err(|e| anyhow::anyhow!("secrets key: {e}"))?;
+    if config.secrets_key.trim().is_empty() && config.session_key.trim().is_empty() {
+        warn!("TT_ALLOW_INSECURE_DEV_KEY=1: using the PUBLICLY KNOWN dev secrets key — lab only");
+    }
     let compute = Arc::new(
         ComputeService::new(
             compute_store,
@@ -308,6 +313,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         endpoint: config.kms_endpoint.clone(),
         token: config.kms_token.clone(),
         region: config.kms_region.clone(),
+        allow_insecure_dev_key: tt_config::insecure_dev_key_allowed(),
     };
     let scarlet = Arc::new(
         SecretsService::with_kms(

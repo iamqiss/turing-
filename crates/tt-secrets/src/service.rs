@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::crypto::Envelope;
 use crate::error::{Result, SecretsError};
-use crate::kms::{build_provider, KmsConfig, KeyProvider};
+use crate::kms::{build_providers, KmsConfig, KeyProvider};
 use crate::store::{SecretRow, SecretsStore};
 
 pub struct SecretsService {
@@ -32,10 +32,10 @@ impl SecretsService {
     }
 
     pub fn with_kms(store: Arc<dyn SecretsStore>, kms: &KmsConfig) -> Result<Self> {
-        let provider = build_provider(kms)?;
+        let (active, retired) = build_providers(kms)?;
         Ok(Self {
             store,
-            envelope: Envelope::new(provider),
+            envelope: Envelope::new(active).with_retired(retired),
         })
     }
 

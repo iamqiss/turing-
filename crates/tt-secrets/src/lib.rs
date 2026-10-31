@@ -11,7 +11,10 @@ mod store;
 mod scan;
 
 pub use crypto::Envelope;
-pub use kms::{build_provider, KmsConfig, KeyProvider, LocalKeyProvider};
+pub use kms::{
+    build_provider, build_providers, parse_retired_local_keys, KeyProvider, KmsConfig,
+    LocalKeyProvider,
+};
 pub use error::{Result, SecretsError};
 pub use service::SecretsService;
 pub use store::{PostgresSecretsStore, SecretRow, SecretsStore};

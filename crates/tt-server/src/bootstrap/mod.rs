@@ -314,6 +314,10 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         token: config.kms_token.clone(),
         region: config.kms_region.clone(),
         allow_insecure_dev_key: tt_config::insecure_dev_key_allowed(),
+        retired_local_keys: tt_secrets::parse_retired_local_keys(
+            &std::env::var("TT_SECRETS_RETIRED_KEYS").unwrap_or_default(),
+        )
+        .map_err(|e| anyhow::anyhow!("TT_SECRETS_RETIRED_KEYS: {e}"))?,
     };
     let scarlet = Arc::new(
         SecretsService::with_kms(

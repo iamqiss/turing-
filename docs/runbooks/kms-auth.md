@@ -71,3 +71,37 @@ it, then re-encrypt under a real key.
 Note: the compute service also accepts `TT_SESSION_KEY` as its secrets key when
 `TT_SECRETS_KEY` is empty, but the local Scarlet provider reads `TT_SECRETS_KEY`
 only. Set `TT_SECRETS_KEY` explicitly.
+
+## Rotating the secrets KEK
+
+Each secret records the provider and key id it was sealed under. New and
+updated secrets always use the **active** key; reading a secret uses the key it
+was sealed under, so rotation no longer breaks old data **as long as the old key
+is still available**.
+
+Local provider:
+
+```bash
+# before: TT_SECRETS_KEY=<old>  TT_KMS_KEY_ID=scarlet-v1
+export TT_SECRETS_KEY="$(openssl rand -hex 32)"
+export TT_KMS_KEY_ID=scarlet-v2
+export TT_SECRETS_RETIRED_KEYS="scarlet-v1:<old 64-hex key>"   # comma-separate several
+```
+
+Moving from `local` to `tt`: set `TT_KMS_PROVIDER=tt` and keep the old local key
+in `TT_SECRETS_RETIRED_KEYS` (use the id it had, normally `scarlet-v1`).
+
+Rules:
+
+- Do not delete a retired key until no secret still depends on it. Updating a
+  secret (`put`) re-seals it under the active key. There is no bulk re-seal job
+  yet; `Envelope::needs_rewrap` is the building block for one.
+- If a secret cannot be opened the error names the provider/key it was sealed
+  under and what is configured, e.g. `cannot unwrap DEK sealed under local/scarlet-v1;
+  configured: local/scarlet-v2 (active)`. That means a retired key is missing.
+- The key id is a label; the key material decides. A renamed label with the same
+  key still opens (a warning is logged).
+- `tt` provider: the control plane now asks tt-kms to unwrap with the recorded
+  key id, but `tt-kms` currently loads a single master key at boot, so it cannot
+  yet serve an old key next to a new one. Rotating tt-kms keys needs that
+  server-side support first.

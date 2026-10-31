@@ -27,6 +27,23 @@ pub trait KeyProvider: Send + Sync {
     fn key_id(&self) -> &str;
     async fn wrap_dek(&self, dek: &[u8]) -> Result<Vec<u8>>;
     async fn unwrap_dek(&self, ciphertext: &[u8]) -> Result<Vec<u8>>;
+
+    /// Unwrap a DEK that was wrapped under `key_id` (the id stored beside it).
+    ///
+    /// The default only serves this provider's own key. Providers whose backend
+    /// holds several keys (tt-kms) override it so old secrets stay readable
+    /// after the active key changes.
+    async fn unwrap_dek_for(&self, key_id: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        if key_id == self.key_id() {
+            self.unwrap_dek(ciphertext).await
+        } else {
+            Err(SecretsError::Crypto(format!(
+                "{} provider holds key {:?}, not {key_id:?}",
+                self.provider_name(),
+                self.key_id()
+            )))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +60,11 @@ pub struct KmsConfig {
     /// Allow the `local` provider to run with the publicly known dev KEK when
     /// `local_key_hex` is empty. Lab only; default false.
     pub allow_insecure_dev_key: bool,
+    /// Old local KEKs that existing secrets may still be sealed under, as
+    /// `(key_id, 64-hex)`. Parse `TT_SECRETS_RETIRED_KEYS` with
+    /// [`parse_retired_local_keys`]. Works with any active provider, so it is
+    /// also the way to keep reading `local` secrets after moving to `tt`.
+    pub retired_local_keys: Vec<(String, String)>,
 }
 
 impl Default for KmsConfig {
@@ -55,8 +77,78 @@ impl Default for KmsConfig {
             token: String::new(),
             region: String::new(),
             allow_insecure_dev_key: false,
+            retired_local_keys: Vec::new(),
         }
     }
+}
+
+/// Active provider (used for every new seal) plus retired providers (read-only).
+pub fn build_providers(
+    cfg: &KmsConfig,
+) -> Result<(
+    std::sync::Arc<dyn KeyProvider>,
+    Vec<std::sync::Arc<dyn KeyProvider>>,
+)> {
+    let active = build_provider(cfg)?;
+    let mut retired: Vec<std::sync::Arc<dyn KeyProvider>> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (id, hex_key) in &cfg.retired_local_keys {
+        validate_key_id(id)?;
+        if hex_key.trim().is_empty() {
+            return Err(SecretsError::Crypto(format!(
+                "retired key {id:?} has an empty value"
+            )));
+        }
+        if !seen.insert(id.clone()) {
+            return Err(SecretsError::Crypto(format!("retired key id {id:?} listed twice")));
+        }
+        if active.provider_name() == "local" && active.key_id() == id {
+            return Err(SecretsError::Crypto(format!(
+                "retired key id {id:?} is also the active local key id"
+            )));
+        }
+        let key = parse_local_key(hex_key, false)?;
+        retired.push(std::sync::Arc::new(LocalKeyProvider {
+            key,
+            key_id: id.clone(),
+        }));
+    }
+    if !retired.is_empty() {
+        info!(count = retired.len(), "KMS: retired local keys loaded (read-only)");
+    }
+    Ok((active, retired))
+}
+
+fn validate_key_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(SecretsError::Crypto(format!(
+            "invalid key id {id:?} (use 1-64 chars of A-Z a-z 0-9 - _ .)"
+        )));
+    }
+    Ok(())
+}
+
+/// Parse `TT_SECRETS_RETIRED_KEYS`: comma-separated `key_id:64-hex` pairs.
+/// Whitespace and empty entries are ignored. Values are validated when the
+/// providers are built.
+pub fn parse_retired_local_keys(s: &str) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (id, key) = part.split_once(':').ok_or_else(|| {
+            SecretsError::Crypto(
+                "TT_SECRETS_RETIRED_KEYS entries must look like key_id:64hex".into(),
+            )
+        })?;
+        let id = id.trim();
+        validate_key_id(id)?;
+        out.push((id.to_string(), key.trim().to_string()));
+    }
+    Ok(out)
 }
 
 pub fn build_provider(cfg: &KmsConfig) -> Result<std::sync::Arc<dyn KeyProvider>> {
@@ -282,6 +374,24 @@ fn sign_request(secret: &str, method: &str, path: &str, body: &[u8]) -> Result<K
 }
 
 impl TtKmsProvider {
+    /// Unwrap under an explicit key id (tt-kms may hold several keys).
+    async fn unwrap_with_key(&self, key_id: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let body = TtUnwrapReq {
+            key_id: Some(key_id.to_string()),
+            ciphertext_b64: b64_enc(ciphertext),
+        };
+        let res = self.post_signed("/v1/unwrap", &body, "unwrap").await?;
+        if !res.status().is_success() {
+            let t = res.text().await.unwrap_or_default();
+            return Err(SecretsError::Crypto(format!("tt-kms unwrap: {t}")));
+        }
+        let parsed: TtUnwrapResp = res
+            .json()
+            .await
+            .map_err(|e| SecretsError::Crypto(format!("tt-kms unwrap json: {e}")))?;
+        b64_dec(&parsed.plaintext_b64)
+    }
+
     /// POST a JSON body, signed when a shared secret is configured.
     /// The signed bytes are exactly the bytes sent.
     async fn post_signed<B: serde::Serialize>(
@@ -343,20 +453,11 @@ impl KeyProvider for TtKmsProvider {
     }
 
     async fn unwrap_dek(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        let body = TtUnwrapReq {
-            key_id: Some(self.key_id.clone()),
-            ciphertext_b64: b64_enc(ciphertext),
-        };
-        let res = self.post_signed("/v1/unwrap", &body, "unwrap").await?;
-        if !res.status().is_success() {
-            let t = res.text().await.unwrap_or_default();
-            return Err(SecretsError::Crypto(format!("tt-kms unwrap: {t}")));
-        }
-        let parsed: TtUnwrapResp = res
-            .json()
-            .await
-            .map_err(|e| SecretsError::Crypto(format!("tt-kms unwrap json: {e}")))?;
-        b64_dec(&parsed.plaintext_b64)
+        self.unwrap_with_key(&self.key_id, ciphertext).await
+    }
+
+    async fn unwrap_dek_for(&self, key_id: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.unwrap_with_key(key_id, ciphertext).await
     }
 }
 
@@ -700,6 +801,79 @@ mod tests {
             ..KmsConfig::default()
         };
         assert!(build_provider(&cfg).is_ok());
+    }
+
+    #[test]
+    fn retired_keys_env_format_is_parsed_and_validated() {
+        let hex1 = "11".repeat(32);
+        let hex2 = "22".repeat(32);
+        let v = parse_retired_local_keys(&format!(" k1:{hex1} , k-2.b:{hex2},, ")).unwrap();
+        assert_eq!(v, vec![("k1".into(), hex1), ("k-2.b".into(), hex2)]);
+        assert!(parse_retired_local_keys("").unwrap().is_empty());
+        assert!(parse_retired_local_keys("no-colon").is_err());
+        assert!(parse_retired_local_keys(":abcd").is_err());
+        assert!(parse_retired_local_keys("bad id:abcd").is_err());
+        assert!(parse_retired_local_keys(&format!("{}:00", "a".repeat(65))).is_err());
+    }
+
+    fn local_cfg(active_id: &str) -> KmsConfig {
+        KmsConfig {
+            provider: "local".into(),
+            local_key_hex: "aa".repeat(32),
+            key_id: active_id.into(),
+            ..KmsConfig::default()
+        }
+    }
+
+    #[test]
+    fn build_providers_loads_retired_keys_read_only() {
+        let mut cfg = local_cfg("k2");
+        cfg.retired_local_keys = vec![("k1".into(), "11".repeat(32))];
+        let (active, retired) = build_providers(&cfg).unwrap();
+        assert_eq!((active.provider_name(), active.key_id()), ("local", "k2"));
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0].key_id(), "k1");
+    }
+
+    #[test]
+    fn build_providers_rejects_bad_retired_entries() {
+        let good = "11".repeat(32);
+        for entries in [
+            vec![("k1".to_string(), "".to_string())],
+            vec![("k1".to_string(), "zz".repeat(32))],
+            vec![("k1".to_string(), "11".to_string())],
+            vec![("bad id".to_string(), good.clone())],
+            vec![("k1".to_string(), good.clone()), ("k1".to_string(), good.clone())],
+            vec![("k2".to_string(), good.clone())], // collides with active id
+        ] {
+            let mut cfg = local_cfg("k2");
+            cfg.retired_local_keys = entries.clone();
+            assert!(build_providers(&cfg).is_err(), "{entries:?}");
+        }
+    }
+
+    #[test]
+    fn retired_local_keys_work_when_migrating_to_tt() {
+        let cfg = KmsConfig {
+            provider: "tt".into(),
+            retired_local_keys: vec![("local".into(), "11".repeat(32))],
+            ..KmsConfig::default()
+        };
+        let (active, retired) = build_providers(&cfg).unwrap();
+        assert_eq!(active.provider_name(), "tt");
+        assert_eq!(retired[0].provider_name(), "local");
+    }
+
+    #[tokio::test]
+    async fn default_unwrap_dek_for_only_serves_its_own_key() {
+        let p = LocalKeyProvider {
+            key: [4u8; 32],
+            key_id: "mine".into(),
+        };
+        let wrapped = p.wrap_dek(&[1u8; 32]).await.unwrap();
+        assert_eq!(p.unwrap_dek_for("mine", &wrapped).await.unwrap(), vec![1u8; 32]);
+        let err = p.unwrap_dek_for("other", &wrapped).await.unwrap_err().to_string();
+        assert!(err.contains("mine") && err.contains("other"), "{err}");
     }
 
     #[test]

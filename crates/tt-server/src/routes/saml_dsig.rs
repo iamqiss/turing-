@@ -15,7 +15,12 @@ use openssl::x509::X509;
 use sha1::{Digest as _, Sha1};
 use sha2::{Digest as Digest2, Sha256};
 
-pub fn verify_saml_xml_dsig(xml: &str, idp_cert_pem_or_der: &str) -> Result<(), String> {
+/// Verify the XML-DSig on a SAML response and return the XML of every element
+/// whose digest was verified (signature-stripped, i.e. exactly the bytes the
+/// digest covers). Callers MUST read claims only from the returned strings,
+/// never from the original document.
+pub fn verify_saml_xml_dsig(xml: &str, idp_cert_pem_or_der: &str) -> Result<Vec<String>, String> {
+    super::saml_assertion::reject_dangerous_xml(xml)?;
     let cert = parse_x509(idp_cert_pem_or_der)?;
     let pkey = cert
         .public_key()
@@ -30,11 +35,10 @@ pub fn verify_saml_xml_dsig(xml: &str, idp_cert_pem_or_der: &str) -> Result<(), 
     let prefix_list = inclusive_ns_prefix_list(xml);
     let c14n_si = exclusive_c14n(&signed_info, &prefix_list)?;
 
-    let alg = signature_method_algorithm(xml);
+    let alg = signature_method_algorithm(&signed_info)?;
     verify_signature(&pkey, alg, &c14n_si, &sig)?;
 
-    verify_references(xml, &prefix_list)?;
-    Ok(())
+    verify_references(&signed_info, xml, &prefix_list)
 }
 
 fn parse_x509(material: &str) -> Result<X509, String> {
@@ -52,13 +56,13 @@ enum SigAlg {
     RsaSha1,
 }
 
-fn signature_method_algorithm(xml: &str) -> SigAlg {
-    if xml.contains("rsa-sha256") || xml.contains("xmldsig-more#rsa-sha256") {
-        SigAlg::RsaSha256
-    } else if xml.contains("rsa-sha1") || xml.contains("#rsa-sha1") {
-        SigAlg::RsaSha1
-    } else {
-        SigAlg::RsaSha256
+fn signature_method_algorithm(signed_info: &str) -> Result<SigAlg, String> {
+    let el = extract_element(signed_info, "SignatureMethod")
+        .ok_or_else(|| "SignedInfo missing SignatureMethod".to_string())?;
+    match attr_value(&el, "Algorithm").as_deref() {
+        Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256") => Ok(SigAlg::RsaSha256),
+        Some("http://www.w3.org/2000/09/xmldsig#rsa-sha1") => Ok(SigAlg::RsaSha1),
+        other => Err(format!("unsupported SignatureMethod: {other:?}")),
     }
 }
 
@@ -139,90 +143,98 @@ fn inclusive_ns_prefix_list(xml: &str) -> BTreeSet<String> {
     set
 }
 
-fn verify_references(xml: &str, prefix_list: &BTreeSet<String>) -> Result<(), String> {
-    let mut search = xml;
-    let mut checked = 0usize;
-    while let Some(idx) = search.find("<") {
-        // find Reference start
-        let rest = &search[idx..];
-        if !(rest.starts_with("<Reference")
-            || rest.starts_with("<ds:Reference")
-            || rest.contains(":Reference "))
-        {
-            // advance to next tag
-            if let Some(n) = search[idx + 1..].find('<') {
-                search = &search[idx + 1 + n..];
-                continue;
-            }
-            break;
-        }
-        // only process actual Reference tags
-        let tag_end = rest.find('>').unwrap_or(0);
-        let head = &rest[..=tag_end];
-        if !head.contains("Reference") || head.contains("ReferenceType") {
-            search = &search[idx + 1..];
+/// Every `Reference` element inside `signed_info` (and only there).
+fn reference_blocks(signed_info: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while let Some(rel) = signed_info[pos..].find('<') {
+        let start = pos + rel;
+        let rest = &signed_info[start + 1..];
+        if rest.starts_with('/') || rest.starts_with('!') || rest.starts_with('?') {
+            pos = start + 1;
             continue;
         }
-        if !head.trim_start().starts_with("<Reference")
-            && !head.contains(":Reference")
-        {
-            search = &search[idx + 1..];
-            continue;
-        }
-
-        let block = match extract_element_from_offset(xml, xml.len() - search.len() + idx, "Reference")
-        {
-            Some(b) => b,
-            None => {
-                search = &search[idx + 1..];
-                continue;
-            }
-        };
-        // advance search past this block
-        if let Some(pos) = search.find(&block) {
-            search = &search[pos + block.len()..];
+        let name_len = rest
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .unwrap_or(rest.len());
+        let local = rest[..name_len].rsplit(':').next().unwrap_or("");
+        if local == "Reference" {
+            let block = extract_element_from_offset(signed_info, start, "Reference")
+                .ok_or_else(|| "malformed Reference element".to_string())?;
+            pos = start + block.len();
+            out.push(block);
         } else {
-            search = &search[idx + 10..];
+            pos = start + 1;
         }
+    }
+    Ok(out)
+}
 
-        let uri = attr_value(&block, "URI").unwrap_or_default();
-        if !uri.starts_with('#') {
-            continue;
-        }
-        let id = &uri[1..];
-        if id.is_empty() {
-            continue;
-        }
+#[derive(Clone, Copy)]
+enum DigestAlg {
+    Sha1,
+    Sha256,
+}
 
-        let digest_b64 = extract_element_text(&block, "DigestValue").unwrap_or_default();
-        if digest_b64.is_empty() {
-            continue;
-        }
+fn digest_algorithm(block: &str) -> Result<DigestAlg, String> {
+    let el = extract_element(block, "DigestMethod")
+        .ok_or_else(|| "Reference missing DigestMethod".to_string())?;
+    match attr_value(&el, "Algorithm").as_deref() {
+        Some("http://www.w3.org/2001/04/xmlenc#sha256") => Ok(DigestAlg::Sha256),
+        Some("http://www.w3.org/2000/09/xmldsig#sha1") => Ok(DigestAlg::Sha1),
+        other => Err(format!("unsupported DigestMethod: {other:?}")),
+    }
+}
 
-        let use_sha1 = (block.contains("#sha1") || block.contains("xmlenc#sha1"))
-            && !block.contains("sha256");
+/// Verify every `Reference` of the (already signature-verified) `signed_info`.
+///
+/// Fails closed: at least one reference is required, each must be a same-document
+/// `#id` reference with a digest, the referenced element must contain this very
+/// Signature (enveloped), and the digest must match. Returns the digested XML
+/// of each referenced element.
+fn verify_references(
+    signed_info: &str,
+    xml: &str,
+    prefix_list: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let blocks = reference_blocks(signed_info)?;
+    if blocks.is_empty() {
+        return Err("SignedInfo contains no Reference".into());
+    }
+    let mut verified = Vec::new();
+    for block in blocks {
+        let uri = attr_value(&block, "URI").ok_or_else(|| "Reference missing URI".to_string())?;
+        let id = uri
+            .strip_prefix('#')
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("unsupported Reference URI: {uri:?}"))?;
+
+        let digest_b64 = extract_element_text(&block, "DigestValue")
+            .filter(|d| !d.is_empty())
+            .ok_or_else(|| "Reference missing DigestValue".to_string())?;
+        let alg = digest_algorithm(&block)?;
 
         let element = find_element_by_id(xml, id)
             .ok_or_else(|| format!("signed reference id not found: {id}"))?;
+        if !element.contains(signed_info) {
+            return Err(format!(
+                "Signature is not enveloped in referenced element #{id}"
+            ));
+        }
         let without_sig = strip_enveloped_signatures(&element);
         let c14n = exclusive_c14n(&without_sig, prefix_list)?;
 
         let expected = decode_b64(&digest_b64)?;
-        let actual: Vec<u8> = if use_sha1 {
-            Sha1::digest(&c14n).to_vec()
-        } else {
-            Sha256::digest(&c14n).to_vec()
+        let actual: Vec<u8> = match alg {
+            DigestAlg::Sha1 => Sha1::digest(&c14n).to_vec(),
+            DigestAlg::Sha256 => Sha256::digest(&c14n).to_vec(),
         };
-
         if expected != actual {
-            return Err(format!(
-                "reference digest mismatch for URI=#{id}"
-            ));
+            return Err(format!("reference digest mismatch for URI=#{id}"));
         }
-        checked += 1;
+        verified.push(without_sig);
     }
-    let _ = checked;
-    Ok(())
+    Ok(verified)
 }
 
 // ----- exclusive C14N (subset of W3C exclusive XML canonicalization) -----
@@ -548,7 +560,7 @@ fn extract_element_from_offset(xml: &str, start: usize, local_name: &str) -> Opt
     let mut depth = 0i32;
     let mut i = 0usize;
     while i < slice.len() {
-        if slice[i..].starts_with('<') {
+        if slice.as_bytes()[i] == b'<' {
             let closing = slice[i..].starts_with("</");
             let rest = if closing {
                 &slice[i + 2..]
@@ -673,5 +685,94 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("xmlns=\"urn:test\""));
         assert!(s.contains("<bar"));
+    }
+
+    const SI_ONE_REF: &str = r##"<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="#a1"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>AAAA</ds:DigestValue></ds:Reference></ds:SignedInfo>"##;
+
+    fn no_prefixes() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn reference_blocks_finds_only_references_in_signed_info() {
+        let blocks = reference_blocks(SI_ONE_REF).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].contains("URI=\"#a1\""));
+    }
+
+    #[test]
+    fn signature_method_is_read_from_signed_info_not_document_text() {
+        let alg = signature_method_algorithm(SI_ONE_REF).unwrap();
+        assert!(matches!(alg, SigAlg::RsaSha256));
+        // attacker text elsewhere in the document cannot downgrade the algorithm
+        let si = SI_ONE_REF.replace(
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
+        );
+        assert!(matches!(signature_method_algorithm(&si).unwrap(), SigAlg::RsaSha1));
+        let bad = SI_ONE_REF.replace("rsa-sha256", "hmac-sha256");
+        assert!(signature_method_algorithm(&bad).is_err());
+    }
+
+    #[test]
+    fn no_reference_is_an_error_not_a_pass() {
+        let si = r#"<ds:SignedInfo xmlns:ds="x"><ds:SignatureMethod Algorithm="y"/></ds:SignedInfo>"#;
+        let err = verify_references(si, si, &no_prefixes()).unwrap_err();
+        assert!(err.contains("no Reference"), "{err}");
+    }
+
+    #[test]
+    fn whole_document_and_external_uris_are_rejected() {
+        for uri in ["", "http://evil.example/x"] {
+            let si = SI_ONE_REF.replace("#a1", uri);
+            let err = verify_references(&si, &si, &no_prefixes()).unwrap_err();
+            assert!(err.contains("unsupported Reference URI"), "{uri}: {err}");
+        }
+    }
+
+    #[test]
+    fn missing_digest_value_is_an_error_not_skipped() {
+        let si = SI_ONE_REF.replace("<ds:DigestValue>AAAA</ds:DigestValue>", "");
+        let err = verify_references(&si, &si, &no_prefixes()).unwrap_err();
+        assert!(err.contains("DigestValue"), "{err}");
+    }
+
+    #[test]
+    fn unknown_digest_method_is_rejected() {
+        let si = SI_ONE_REF.replace("xmlenc#sha256", "xmlenc#sha999");
+        let err = verify_references(&si, &si, &no_prefixes()).unwrap_err();
+        assert!(err.contains("DigestMethod"), "{err}");
+    }
+
+    #[test]
+    fn referenced_id_must_exist() {
+        let xml = format!(r#"<r><x ID="other"/>{SI_ONE_REF}</r>"#);
+        let err = verify_references(SI_ONE_REF, &xml, &no_prefixes()).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn referenced_element_must_envelop_the_signature() {
+        // The element with ID a1 exists but the SignedInfo lives outside it:
+        // a signature lifted from elsewhere must not "sign" this element.
+        let xml = format!(r#"<r><saml:Assertion ID="a1"><x/></saml:Assertion>{SI_ONE_REF}</r>"#);
+        let err = verify_references(SI_ONE_REF, &xml, &no_prefixes()).unwrap_err();
+        assert!(err.contains("not enveloped"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_id_decoy_before_real_element_is_rejected_not_trusted() {
+        let xml = format!(
+            r#"<r><saml:Assertion ID="a1"><NameID>admin@victim.com</NameID></saml:Assertion><saml:Assertion ID="a1">{SI_ONE_REF}</saml:Assertion></r>"#
+        );
+        // first element with ID=a1 is the decoy; it does not contain the signature
+        assert!(verify_references(SI_ONE_REF, &xml, &no_prefixes()).is_err());
+    }
+
+    #[test]
+    fn non_ascii_text_does_not_panic_element_extraction() {
+        let xml = "<a>é日本語<b>ü</b></a>";
+        assert!(extract_element(xml, "b").is_some());
+        assert!(extract_element_text(xml, "b").is_some());
     }
 }

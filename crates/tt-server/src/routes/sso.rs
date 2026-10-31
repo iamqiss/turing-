@@ -21,6 +21,7 @@ use tt_core::ids::{OrgId, PrincipalId};
 use uuid::Uuid;
 
 use crate::routes::jwks_cache::JwksCache;
+use crate::routes::saml_assertion;
 use crate::routes::saml_dsig;
 use crate::state::AppState;
 use std::sync::LazyLock;
@@ -378,7 +379,7 @@ async fn saml_start(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
     xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
-    ID="_{state_token}"
+    ID="{request_id}"
     Version="2.0"
     IssueInstant="{instant}"
     Destination="{dest}"
@@ -391,7 +392,7 @@ async fn saml_start(
         dest = idp_sso,
         acs = acs,
         issuer = sp_entity,
-        state_token = state_token.replace(['+', '/', '='], ""),
+        request_id = authn_request_id(&state_token),
     );
 
     let deflated = deflate_raw(saml_request_xml.as_bytes());
@@ -464,23 +465,45 @@ async fn saml_acs(
         }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    if let Err(e) = saml_dsig::verify_saml_xml_dsig(&xml, &cert) {
-        warn!(org_id = %org_id, error = %e, "SAML XML-DSig verification failed");
-        return (StatusCode::UNAUTHORIZED, format!("SAML signature invalid: {e}")).into_response();
-    }
 
-    let claims = match parse_saml_claims(&xml) {
-        Ok(c) => c,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("assertion: {e}")).into_response(),
+    // Only XML whose digest was verified under the IdP signature may be trusted.
+    let verified = match saml_dsig::verify_saml_xml_dsig(&xml, &cert) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(org_id = %org_id, error = %e, "SAML XML-DSig verification failed");
+            return (StatusCode::UNAUTHORIZED, "SAML signature invalid").into_response();
+        }
     };
 
-    // Basic audience / destination checks when present
-    if let Some(ref dest) = claims.destination {
-        let acs = callback_url(&state, "saml");
-        if !dest.is_empty() && *dest != acs && !dest.contains("/api/auth/sso/saml/acs") {
-            warn!(%dest, %acs, "SAML Destination mismatch");
+    // The AuthnRequest ID we issued in saml_start is "_" + RelayState without +/=.
+    let in_response_to = authn_request_id(&relay);
+    let acs = callback_url(&state, "saml");
+    let expect = saml_assertion::Expect {
+        now: Utc::now(),
+        recipient: &acs,
+        in_response_to: &in_response_to,
+        audience: cfg.saml_sp_entity_id.as_deref().filter(|s| !s.is_empty()),
+        skew_secs: 120,
+    };
+
+    let mut claims = None;
+    let mut last_err = String::from("no signed element");
+    for element in &verified {
+        match saml_assertion::validate(element, &expect).and_then(|_| parse_saml_claims(element)) {
+            Ok(c) => {
+                claims = Some(c);
+                break;
+            }
+            Err(e) => last_err = e,
         }
     }
+    let claims = match claims {
+        Some(c) => c,
+        None => {
+            warn!(org_id = %org_id, error = %last_err, "SAML assertion rejected");
+            return (StatusCode::UNAUTHORIZED, "SAML assertion rejected").into_response();
+        }
+    };
 
     finish_sso_login(&state, org_id, &claims.to_oidc_like(), cfg.jit_provisioning, "sso-saml")
         .await
@@ -811,7 +834,6 @@ struct SamlClaims {
     email: Option<String>,
     name_id: Option<String>,
     display_name: Option<String>,
-    destination: Option<String>,
 }
 
 impl SamlClaims {
@@ -851,6 +873,13 @@ fn decode_saml_response(b64: &str) -> Result<String, String> {
     }
 }
 
+/// SAML `ID` of the AuthnRequest we send for a given login-state token.
+/// Must be an XML NCName, so it starts with `_` and drops base64 punctuation.
+/// The ACS handler recomputes it to check `InResponseTo`.
+fn authn_request_id(state_token: &str) -> String {
+    format!("_{}", state_token.replace(['+', '/', '='], ""))
+}
+
 fn parse_saml_claims(xml: &str) -> Result<SamlClaims, String> {
     let name_id = extract_xml_text(xml, "NameID");
     let email = extract_saml_attr(xml, "email")
@@ -859,7 +888,6 @@ fn parse_saml_claims(xml: &str) -> Result<SamlClaims, String> {
         .or_else(|| name_id.clone().filter(|s| s.contains('@')));
     let display_name = extract_saml_attr(xml, "displayName")
         .or_else(|| extract_saml_attr(xml, "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"));
-    let destination = extract_xml_attr(xml, "Destination");
 
     if name_id.is_none() && email.is_none() {
         return Err("no NameID or email attribute".into());
@@ -868,7 +896,6 @@ fn parse_saml_claims(xml: &str) -> Result<SamlClaims, String> {
         email,
         name_id,
         display_name,
-        destination,
     })
 }
 
@@ -894,15 +921,6 @@ fn extract_xml_text(xml: &str, tag: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn extract_xml_attr(xml: &str, attr: &str) -> Option<String> {
-    let key = format!("{attr}=\"");
-    let idx = xml.find(&key)?;
-    let start = idx + key.len();
-    let rest = &xml[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
 }
 
 fn extract_saml_attr(xml: &str, name: &str) -> Option<String> {
@@ -967,4 +985,29 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod saml_tests {
+    use super::*;
+
+    #[test]
+    fn authn_request_id_is_stable_and_ncname_safe() {
+        assert_eq!(authn_request_id("saml_ab+c/d=="), "_saml_abcd");
+        assert_eq!(authn_request_id("x"), authn_request_id("x"));
+        assert!(!authn_request_id("a+b/c=").contains(['+', '/', '=']));
+    }
+
+    #[test]
+    fn claims_are_read_from_the_given_element() {
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:Subject><saml:NameID>alice@example.com</saml:NameID></saml:Subject><saml:AttributeStatement><saml:Attribute Name="displayName"><saml:AttributeValue>Alice A</saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>"#;
+        let c = parse_saml_claims(xml).unwrap();
+        assert_eq!(c.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(c.display_name.as_deref(), Some("Alice A"));
+    }
+
+    #[test]
+    fn claims_without_identity_are_rejected() {
+        assert!(parse_saml_claims("<a/>").is_err());
+    }
 }

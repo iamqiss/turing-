@@ -2,6 +2,7 @@
 
 mod auth;
 mod sso;
+mod saml_assertion;
 mod saml_dsig;
 mod jwks_cache;
 mod repos;
